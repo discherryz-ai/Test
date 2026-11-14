@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     vk::raii::DebugUtilsMessengerEXT debug(instance, vk::DebugUtilsMessengerCreateInfoEXT{
         .messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eError,
         .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation | vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral,
-        .pfnUserCallback = Debug});
+        .pfnUserCallback = reinterpret_cast<vk::PFN_DebugUtilsMessengerCallbackEXT>(Debug)});
     vk::raii::PhysicalDevice physical{instance.enumeratePhysicalDevices().front()};
     const auto families{physical.getQueueFamilyProperties()};
     uint32_t family{};
