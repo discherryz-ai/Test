@@ -281,6 +281,21 @@ namespace skyline::gpu::interconnect::maxwell3d {
         if (viewport.scaleZ < 0.0f)
             std::swap(vkViewport.minDepth, vkViewport.maxDepth);
 
+        {
+            static u64 vpSeen[400]{};
+            static u32 vpSeenCount{};
+            u64 key{1469598103934665603ULL};
+            const double vals[]{static_cast<double>(viewport.scaleX), static_cast<double>(viewport.scaleY), static_cast<double>(viewport.offsetX), static_cast<double>(viewport.offsetY), static_cast<double>(static_cast<int>(viewport.swizzle.y)), static_cast<double>(static_cast<int>(windowOrigin.lowerLeft)), static_cast<double>(static_cast<int>(windowOrigin.flipY))};
+            for (double v : vals)
+                key = (key ^ static_cast<u64>(static_cast<i64>(v * 100.0))) * 1099511628211ULL;
+            bool isNew{true};
+            for (u32 i{}; i < vpSeenCount; i++)
+                if (vpSeen[i] == key) { isNew = false; break; }
+            if (isNew && vpSeenCount < 400) {
+                vpSeen[vpSeenCount++] = key;
+                LOGW("DBG viewport: scaleX={} offsetX={} scaleY={} offsetY={} swzY={} lowerLeft={} flipY={} -> vkX={} vkY={} vkW={} vkH={}", static_cast<float>(viewport.scaleX), static_cast<float>(viewport.offsetX), static_cast<float>(viewport.scaleY), static_cast<float>(viewport.offsetY), static_cast<int>(viewport.swizzle.y), static_cast<int>(windowOrigin.lowerLeft), static_cast<int>(windowOrigin.flipY), vkViewport.x, vkViewport.y, vkViewport.width, vkViewport.height);
+            }
+        }
         return vkViewport;
     }
 
@@ -289,6 +304,21 @@ namespace skyline::gpu::interconnect::maxwell3d {
             return;
 
         if (!engine->viewportScaleOffsetEnable) {
+            {
+                static u64 nsSeen[200]{};
+                static u32 nsSeenCount{};
+                u64 key{1469598103934665603ULL};
+                const double vals[]{static_cast<double>(engine->surfaceClip.horizontal.x), static_cast<double>(engine->surfaceClip.vertical.y), static_cast<double>(engine->surfaceClip.horizontal.width), static_cast<double>(engine->surfaceClip.vertical.height), static_cast<double>(static_cast<int>(engine->windowOrigin.lowerLeft)), static_cast<double>(static_cast<int>(engine->windowOrigin.flipY))};
+                for (double v : vals)
+                    key = (key ^ static_cast<u64>(static_cast<i64>(v * 100.0))) * 1099511628211ULL;
+                bool isNew{true};
+                for (u32 i{}; i < nsSeenCount; i++)
+                    if (nsSeen[i] == key) { isNew = false; break; }
+                if (isNew && nsSeenCount < 200) {
+                    nsSeen[nsSeenCount++] = key;
+                    LOGW("DBG viewport NO_SCALE_OFFSET: x={} y={} w={} h={} lowerLeft={} flipY={}", static_cast<float>(engine->surfaceClip.horizontal.x), static_cast<float>(engine->surfaceClip.vertical.y), static_cast<float>(engine->surfaceClip.horizontal.width), static_cast<float>(engine->surfaceClip.vertical.height), static_cast<int>(engine->windowOrigin.lowerLeft), static_cast<int>(engine->windowOrigin.flipY));
+                }
+            }
             builder.SetViewport(index, vk::Viewport{
                 .x = static_cast<float>(engine->surfaceClip.horizontal.x),
                 .y = static_cast<float>(engine->surfaceClip.vertical.y),

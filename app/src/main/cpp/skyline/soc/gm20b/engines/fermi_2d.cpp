@@ -56,6 +56,21 @@ namespace skyline::soc::gm20b::engine::fermi2d {
                 duDx = dvDy = 1.0f;
             }
 
+            {
+                static u64 blitSeen[512]{};
+                static u32 blitSeenCount{};
+                u64 key{1469598103934665603ULL};
+                const double vals[]{static_cast<double>(duDx), static_cast<double>(dvDy), static_cast<double>(pixelsFromMemory.dstWidth), static_cast<double>(pixelsFromMemory.dstHeight), static_cast<double>(static_cast<int>(registers.pixelsFromMemory->sampleMode.origin))};
+                for (double v : vals)
+                    key = (key ^ static_cast<u64>(static_cast<i64>(v * 1000.0))) * 1099511628211ULL;
+                bool isNew{true};
+                for (u32 i{}; i < blitSeenCount; i++)
+                    if (blitSeen[i] == key) { isNew = false; break; }
+                if (isNew && blitSeenCount < 512) {
+                    blitSeen[blitSeenCount++] = key;
+                    LOGW("DBG Fermi2D blit: srcX={} srcY={} duDx={} dvDy={} dstW={} dstH={} origin={}", srcX, srcY, duDx, dvDy, static_cast<u32>(pixelsFromMemory.dstWidth), static_cast<u32>(pixelsFromMemory.dstHeight), static_cast<int>(registers.pixelsFromMemory->sampleMode.origin));
+                }
+            }
             interconnect.Blit(src, dst,
                               srcX, srcY,
                               pixelsFromMemory.dstWidth, pixelsFromMemory.dstHeight,
