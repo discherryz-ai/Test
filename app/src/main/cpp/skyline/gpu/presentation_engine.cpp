@@ -86,6 +86,17 @@ namespace skyline::gpu {
         std::scoped_lock textureLock(*frame.textureView);
 
         auto texture{frame.textureView->texture};
+
+        {
+            static u32 dbgPresentCount{};
+            static i64 dbgLastUs{};
+            i64 nowUs{std::chrono::duration_cast<std::chrono::microseconds>(GuestFrameClock::Clock::now().time_since_epoch()).count()};
+            if (dbgPresentCount < 1500) {
+                dbgPresentCount++;
+                LOGW("DBG present #{} tex=0x{:x} dtUs={} swapInterval={}", dbgPresentCount, static_cast<u64>(reinterpret_cast<uintptr_t>(texture.get())), nowUs - dbgLastUs, static_cast<i64>(frame.swapInterval));
+            }
+            dbgLastUs = nowUs;
+        }
         if (frame.textureView->format != swapchainFormat || texture->dimensions != swapchainExtent)
             UpdateSwapchain(frame.textureView->format, texture->dimensions);
 

@@ -1056,7 +1056,7 @@ namespace skyline::gpu {
             return gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
                 auto sourceBacking{scaledSource ? sourceTarget->image.vkImage : source->GetBacking()};
                 if (sourceLayout != vk::ImageLayout::eTransferSrcOptimal) {
-                    commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
+                    commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{
                         .image = sourceBacking,
                         .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
                         .dstAccessMask = vk::AccessFlagBits::eTransferRead,
