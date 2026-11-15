@@ -868,6 +868,14 @@ namespace skyline::gpu {
             gpu.state.process->trap.TrapRegions(*trapHandle, !gpuDirty); // Trap any future CPU reads (optionally) + writes to this texture
         }
 
+        {
+            static u32 dbgSyncCount{};
+            if (dbgSyncCount < 6000) {
+                dbgSyncCount++;
+                LOGW("DBG SyncHost upload #{} tex=0x{:x} gpuDirty={} w={} h={}", dbgSyncCount, static_cast<u64>(reinterpret_cast<uintptr_t>(this)), static_cast<int>(gpuDirty), static_cast<u32>(dimensions.width), static_cast<u32>(dimensions.height));
+            }
+        }
+
         // From this point on Clean -> CPU dirty state transitions can occur, GPU dirty -> * transitions will always require the full lock to be held and thus won't occur
 
         if (!gpu.resolutionScale.IsNative()) {
