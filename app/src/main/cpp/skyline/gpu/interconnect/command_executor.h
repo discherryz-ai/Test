@@ -166,6 +166,13 @@ namespace skyline::gpu::interconnect {
         void NoteSubmit(const std::shared_ptr<FenceCycle> &cycle);
 
         /**
+         * @return The cycle of the most recent submission of the owning executor (null if there was none)
+         */
+        const std::shared_ptr<FenceCycle> &LastSubmitted() const {
+            return lastSubmitted;
+        }
+
+        /**
          * @brief Runs `actions` in order on the worker thread once the most recent submission has been handed to the GPU queue
          */
         void QueueAfterLastSubmit(std::vector<std::function<void()>> &&actions);

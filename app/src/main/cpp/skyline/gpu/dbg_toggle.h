@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <sys/system_properties.h>
 #include <common.h>
 #include <logger/logger.h>
@@ -130,5 +131,76 @@ namespace skyline::dbg {
             merged.fetch_add(1, std::memory_order_relaxed);
         if (n <= 10 || (n & (n - 1)) == 0)
             LOGW("DBG clear-after-draw n={} merged_into_loadop_total={} kind={} merged_now={}", n, merged.load(std::memory_order_relaxed), kind, mergedIntoLoadOp);
+    }
+
+    inline std::atomic<u32> &ExecutorCount() {
+        static std::atomic<u32> count{0};
+        return count;
+    }
+
+    /**
+     * @brief Фиксирует создание исполнителя команд (по одному на канал GPU)
+     */
+    inline void NoteExecutorCreated(const void *owner) {
+        u32 n{ExecutorCount().fetch_add(1, std::memory_order_relaxed) + 1};
+        LOGW("DBG executor created #{} owner=0x{:x}", n, reinterpret_cast<std::uintptr_t>(owner));
+    }
+
+    struct SignalEntry {
+        const void *owner;
+        std::function<void()> wait; //!< Ждёт, пока последний отправленный этим исполнителем буфер команд попадёт в очередь GPU
+    };
+
+    inline std::mutex &SignalMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    inline std::vector<SignalEntry> &SignalEntries() {
+        static std::vector<SignalEntry> entries;
+        return entries;
+    }
+
+    /**
+     * @brief Исполнитель `owner` сейчас сообщит гостю о завершении работы: запоминаем, чего должны дождаться остальные исполнители перед своей отправкой
+     */
+    inline void NoteSignal(const void *owner, std::function<void()> wait) {
+        std::scoped_lock lock{SignalMutex()};
+        for (auto &entry : SignalEntries()) {
+            if (entry.owner == owner) {
+                entry.wait = std::move(wait);
+                return;
+            }
+        }
+        SignalEntries().push_back(SignalEntry{owner, std::move(wait)});
+    }
+
+    /**
+     * @brief Ждёт, пока все ДРУГИЕ исполнители отправят в очередь GPU буферы команд, о завершении которых они уже сообщили гостю
+     */
+    inline void WaitOthers(const void *self) {
+        std::vector<std::function<void()>> waiters;
+        {
+            std::scoped_lock lock{SignalMutex()};
+            for (auto &entry : SignalEntries())
+                if (entry.owner != self && entry.wait)
+                    waiters.push_back(entry.wait);
+        }
+        if (waiters.empty())
+            return;
+
+        static std::atomic<std::uint64_t> calls{0}, blocked{0}, blockedUs{0};
+        auto start{std::chrono::steady_clock::now()};
+        for (auto &waiter : waiters)
+            waiter();
+        auto us{static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count())};
+
+        std::uint64_t n{calls.fetch_add(1, std::memory_order_relaxed) + 1};
+        if (us > 50) {
+            blocked.fetch_add(1, std::memory_order_relaxed);
+            blockedUs.fetch_add(us, std::memory_order_relaxed);
+        }
+        if (n <= 5 || (n % 512) == 0)
+            LOGW("DBG xexec: calls={} blocked={} blocked_ms={} others={}", n, blocked.load(std::memory_order_relaxed), blockedUs.load(std::memory_order_relaxed) / 1000, waiters.size());
     }
 }

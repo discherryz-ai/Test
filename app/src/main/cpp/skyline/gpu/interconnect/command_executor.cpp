@@ -436,6 +436,7 @@ namespace skyline::gpu::interconnect {
           signalThread{state},
           checkpointPollerThread{EnableGpuCheckpoints ? std::optional<CheckpointPollerThread>{state} : std::optional<CheckpointPollerThread>{}},
           tag{AllocateTag()} {
+        dbg::NoteExecutorCreated(this);
         RotateRecordSlot();
     }
 
@@ -831,6 +832,10 @@ namespace skyline::gpu::interconnect {
                 waiterThread.Queue(nullptr, std::move(callback));
         }
 
+        // DBG 0x20000000: never hand our command buffer to the GPU queue before another executor's work that the guest was already told is done
+        if ((dbg::Mask() & 0x20000000u) && !slot->nodes.empty())
+            dbg::WaitOthers(this);
+
         if (!slot->nodes.empty()) {
             TRACE_EVENT("gpu", "CommandExecutor::Submit");
             SubmitInternal();
@@ -844,6 +849,16 @@ namespace skyline::gpu::interconnect {
                 else if (dbgM & (0x200u | 0x400u | 0x1000u | 0x2000u | 0x8000u | 0x80000u))
                     dbg::SetLastSubmit([dbgSubmitCycle] { dbgSubmitCycle->WaitSubmit(); });
             }
+        }
+
+        if ((dbg::Mask() & 0x20000000u) && (callback || !pendingDeferredActions.empty())) {
+            // The guest is about to be told that our work is done: other executors must not submit before our last command buffer is in the queue
+            const auto &lastCycle{signalThread.LastSubmitted()};
+            if (lastCycle)
+                dbg::NoteSignal(this, [weak = std::weak_ptr<FenceCycle>{lastCycle}] {
+                    if (auto strong{weak.lock()})
+                        strong->WaitSubmit();
+                });
         }
 
         if (!*state.settings->useDirectMemoryImport) {
