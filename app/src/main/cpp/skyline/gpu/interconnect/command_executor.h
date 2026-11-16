@@ -4,6 +4,11 @@
 #pragma once
 
 #include <boost/container/stable_vector.hpp>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
 #include <renderdoc_app.h>
 #include <common/linear_allocator.h>
 #include <gpu/usage_tracker.h>
@@ -128,6 +133,50 @@ namespace skyline::gpu::interconnect {
     };
 
     /**
+     * @brief Thread that tells the guest that GPU work was submitted (syncpoints, semaphores, callbacks) only AFTER the command buffer has really been handed to the GPU queue
+     * @note Without it, the guest is notified as soon as the nodes are queued to the record thread, i.e. before the work is even recorded/submitted
+     */
+    class SubmitSignalThread {
+      private:
+        struct Item {
+            std::shared_ptr<FenceCycle> cycle; //!< The cycle that has to be submitted before the actions run (nullable)
+            std::vector<std::function<void()>> actions;
+        };
+
+        const DeviceState &state;
+        std::mutex mutex;
+        std::condition_variable condition; //!< Wakes the worker
+        std::condition_variable idleCondition; //!< Wakes Flush() callers
+        std::deque<Item> queue;
+        bool processing{};
+        bool stop{};
+        std::shared_ptr<FenceCycle> lastSubmitted; //!< Only touched by the thread that owns the executor
+        std::thread thread;
+
+        void Run();
+
+      public:
+        explicit SubmitSignalThread(const DeviceState &state);
+
+        ~SubmitSignalThread();
+
+        /**
+         * @brief Remembers the cycle of the most recent submission of the owning executor
+         */
+        void NoteSubmit(const std::shared_ptr<FenceCycle> &cycle);
+
+        /**
+         * @brief Runs `actions` in order on the worker thread once the most recent submission has been handed to the GPU queue
+         */
+        void QueueAfterLastSubmit(std::vector<std::function<void()>> &&actions);
+
+        /**
+         * @brief Blocks until every queued action has been executed
+         */
+        void Flush();
+    };
+
+    /**
      * @brief Polls the debug buffer for checkpoint updates and reports them to perfetto
      */
     class CheckpointPollerThread {
@@ -152,6 +201,7 @@ namespace skyline::gpu::interconnect {
         CommandRecordThread recordThread;
         CommandRecordThread::Slot *slot{};
         ExecutionWaiterThread waiterThread;
+        SubmitSignalThread signalThread;
         std::optional<CheckpointPollerThread> checkpointPollerThread;
         node::RenderPassNode *renderPass{};
         std::list<node::NodeVariant, LinearAllocator<node::NodeVariant>>::iterator renderPassIt;

@@ -332,6 +332,79 @@ namespace skyline::gpu::interconnect {
         condition.notify_all();
     }
 
+    SubmitSignalThread::SubmitSignalThread(const DeviceState &state) : state{state}, thread{&SubmitSignalThread::Run, this} {}
+
+    SubmitSignalThread::~SubmitSignalThread() {
+        {
+            std::scoped_lock lock{mutex};
+            stop = true;
+        }
+        condition.notify_all();
+        if (thread.joinable())
+            thread.join();
+    }
+
+    void SubmitSignalThread::NoteSubmit(const std::shared_ptr<FenceCycle> &cycle) {
+        lastSubmitted = cycle;
+    }
+
+    void SubmitSignalThread::QueueAfterLastSubmit(std::vector<std::function<void()>> &&actions) {
+        if (actions.empty())
+            return;
+        {
+            std::scoped_lock lock{mutex};
+            queue.push_back(Item{lastSubmitted, std::move(actions)});
+        }
+        condition.notify_all();
+    }
+
+    void SubmitSignalThread::Flush() {
+        std::unique_lock lock{mutex};
+        idleCondition.wait(lock, [this] { return queue.empty() && !processing; });
+    }
+
+    void SubmitSignalThread::Run() {
+        if (int result{pthread_setname_np(pthread_self(), "Sky-SubmitSig")})
+            LOGW("Failed to set the thread name: {}", strerror(result));
+        AsyncLogger::UpdateTag();
+
+        try {
+            std::unique_lock lock{mutex};
+            while (true) {
+                condition.wait(lock, [this] { return stop || !queue.empty(); });
+                if (queue.empty())
+                    return; // Only reachable when stopping
+
+                Item item{std::move(queue.front())};
+                queue.pop_front();
+                processing = true;
+                lock.unlock();
+
+                if (item.cycle)
+                    item.cycle->WaitSubmit(); // Returns immediately when the cycle has already been submitted or signalled
+                for (auto &action : item.actions)
+                    action();
+
+                lock.lock();
+                processing = false;
+                if (queue.empty())
+                    idleCondition.notify_all();
+            }
+        } catch (const signal::SignalException &e) {
+            LOGE("{}\nStack Trace:{}", e.what(), state.loader->GetStackTrace(e.frames));
+            if (state.process)
+                state.process->Kill(false);
+            else
+                std::rethrow_exception(std::current_exception());
+        } catch (const std::exception &e) {
+            LOGE("{}", e.what());
+            if (state.process)
+                state.process->Kill(false);
+            else
+                std::rethrow_exception(std::current_exception());
+        }
+    }
+
     void CheckpointPollerThread::Run() {
         u32 prevCheckpoint{};
         for (size_t iteration{}; true; iteration++) {
@@ -360,6 +433,7 @@ namespace skyline::gpu::interconnect {
           gpu{*state.gpu},
           recordThread{state},
           waiterThread{state},
+          signalThread{state},
           checkpointPollerThread{EnableGpuCheckpoints ? std::optional<CheckpointPollerThread>{state} : std::optional<CheckpointPollerThread>{}},
           tag{AllocateTag()} {
         RotateRecordSlot();
@@ -762,6 +836,7 @@ namespace skyline::gpu::interconnect {
             SubmitInternal();
             submissionNumber++;
             dbgDidSubmit = true;
+            signalThread.NoteSubmit(dbgSubmitCycle);
             {
                 const u32 dbgM{dbg::Mask()};
                 if (!(dbgM & 0x4000u) || (dbgM & 0x40u))
@@ -773,18 +848,31 @@ namespace skyline::gpu::interconnect {
 
         if (!*state.settings->useDirectMemoryImport) {
             // When DMI is not in use, execute callbacks immediately after submission
-            if (dbgDidSubmit && (dbg::Mask() & 0x100000u) && (callback || !pendingDeferredActions.empty()))
-                dbgSubmitCycle->WaitSubmit();
-            for (auto &actionCb : pendingDeferredActions)
-                actionCb();
+            if (dbg::Mask() & 0x800000u) {
+                // Notify the guest from a separate thread, but only once the command buffer has really been submitted to the GPU queue
+                std::vector<std::function<void()>> actions{std::move(pendingDeferredActions)};
+                pendingDeferredActions.clear();
+                if (callback)
+                    actions.emplace_back(std::move(callback));
+                signalThread.QueueAfterLastSubmit(std::move(actions));
+            } else {
+                signalThread.Flush(); // Keep ordering if the mode was just switched at runtime
+                if (dbgDidSubmit && (dbg::Mask() & 0x100000u) && (callback || !pendingDeferredActions.empty()))
+                    dbgSubmitCycle->WaitSubmit();
+                for (auto &actionCb : pendingDeferredActions)
+                    actionCb();
 
-            pendingDeferredActions.clear();
+                pendingDeferredActions.clear();
 
-            if (callback)
-                callback();
+                if (callback)
+                    callback();
+            }
         }
 
         ResetInternal();
+
+        if (wait)
+            signalThread.Flush();
 
         if (wait || (dbg::Mask() & 1u)) {
             if (wait)
