@@ -934,6 +934,13 @@ namespace skyline::gpu {
         if (stagingBuffer) {
             CopyFromStagingBuffer(commandBuffer, stagingBuffer);
             pCycle->AttachObjects(stagingBuffer, shared_from_this());
+            {
+                static u32 dbgInlineCount{};
+                if (dbgInlineCount < 6000) {
+                    dbgInlineCount++;
+                    LOGW("DBG SyncInline #{} tex=0x{:x} gpuDirty={} rt={} w={} h={}", dbgInlineCount, static_cast<u64>(reinterpret_cast<uintptr_t>(this)), static_cast<int>(gpuDirty), static_cast<int>(everUsedAsRt), static_cast<u32>(dimensions.width), static_cast<u32>(dimensions.height));
+                }
+            }
             pCycle->ChainCycle(cycle);
             cycle = pCycle;
         }
