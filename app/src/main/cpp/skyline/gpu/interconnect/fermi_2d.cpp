@@ -8,6 +8,7 @@
 #include <soc/gm20b/gmmu.h>
 #include <soc/gm20b/channel.h>
 #include "fermi_2d.h"
+#include <gpu/dbg_toggle.h>
 
 namespace skyline::gpu::interconnect {
     using IOVA = soc::gm20b::IOVA;
@@ -120,6 +121,8 @@ namespace skyline::gpu::interconnect {
 
     void Fermi2D::Blit(const Surface &srcSurface, const Surface &dstSurface, float srcRectX, float srcRectY, u32 dstRectWidth, u32 dstRectHeight, u32 dstRectX, u32 dstRectY, float duDx, float dvDy, SampleModeOrigin sampleOrigin, bool resolve, SampleModeFilter filter) {
         TRACE_EVENT("gpu", "Fermi2D::Blit");
+        if (dbg::Mask() & 0x1000u)
+            dbg::WaitLastSubmit();
 
         // Blit shader always samples from centre so adjust if necessary
         float centredSrcRectX{sampleOrigin == SampleModeOrigin::Corner ? srcRectX - 0.5f : srcRectX};

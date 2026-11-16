@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +40,8 @@ namespace skyline::dbg {
      * @note Бит 64: ждать отправки буфера команд (не выполнения)
      * @note Бит 128: запись в буфер только через GPU-копирование
      * @note Бит 256: перед прямой записью в буфер ждать GPU
+     * @note ПО УМОЛЧАНИЮ после каждой отправки команд ждём, пока поток записи запишет и отправит буфер команд
+     * @note Бит 0x4000: выключить это ожидание; 0x200 / 0x400 / 0x1000: ждать только при поиске буферов / текстур / перед 2D-блитом
      */
     inline u32 Mask() {
         static std::atomic<u32> mask{0};
@@ -68,6 +72,37 @@ namespace skyline::dbg {
         }
 
         return mask.load(std::memory_order_relaxed);
+    }
+
+    inline std::mutex &LastSubmitMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    inline std::function<void()> &LastSubmitWaiter() {
+        static std::function<void()> waiter;
+        return waiter;
+    }
+
+    /**
+     * @brief Запоминает, как дождаться записи и отправки последнего буфера команд
+     */
+    inline void SetLastSubmit(std::function<void()> waiter) {
+        std::scoped_lock lock{LastSubmitMutex()};
+        LastSubmitWaiter() = std::move(waiter);
+    }
+
+    /**
+     * @brief Ждёт, пока последний отправленный буфер команд будет записан и отправлен в очередь GPU
+     */
+    inline void WaitLastSubmit() {
+        std::function<void()> waiter;
+        {
+            std::scoped_lock lock{LastSubmitMutex()};
+            waiter = LastSubmitWaiter();
+        }
+        if (waiter)
+            waiter();
     }
 
     /**

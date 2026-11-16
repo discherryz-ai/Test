@@ -746,8 +746,13 @@ namespace skyline::gpu::interconnect {
             TRACE_EVENT("gpu", "CommandExecutor::Submit");
             SubmitInternal();
             submissionNumber++;
-            if (dbg::Mask() & 0x40u)
-                dbgSubmitCycle->WaitSubmit();
+            {
+                const u32 dbgM{dbg::Mask()};
+                if (!(dbgM & 0x4000u) || (dbgM & 0x40u))
+                    dbgSubmitCycle->WaitSubmit();
+                else if (dbgM & (0x200u | 0x400u | 0x1000u))
+                    dbg::SetLastSubmit([dbgSubmitCycle] { dbgSubmitCycle->WaitSubmit(); });
+            }
         }
 
         if (!*state.settings->useDirectMemoryImport) {

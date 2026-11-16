@@ -4,6 +4,7 @@
 #include <common/settings.h>
 #include <gpu.h>
 #include "buffer_manager.h"
+#include <gpu/dbg_toggle.h>
 
 namespace skyline::gpu {
     BufferManager::BufferManager(GPU &gpu) : gpu{gpu} {}
@@ -144,6 +145,9 @@ namespace skyline::gpu {
     }
 
     BufferView BufferManager::FindOrCreateImpl(GuestBuffer guestMapping, ContextTag tag, const std::function<void(std::shared_ptr<Buffer>, ContextLock<Buffer> &&)> &attachBuffer) {
+        if (dbg::Mask() & 0x200u)
+            dbg::WaitLastSubmit();
+
         /*
          * We align the buffer to the page boundary to ensure that:
          * 1) Any buffer view has the same alignment guarantees as on the guest, this is required for UBOs, SSBOs and Texel buffers

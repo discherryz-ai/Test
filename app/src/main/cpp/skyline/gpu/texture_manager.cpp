@@ -3,12 +3,15 @@
 
 #include <common/trace.h>
 #include "texture_manager.h"
+#include <gpu/dbg_toggle.h>
 
 namespace skyline::gpu {
     TextureManager::TextureManager(GPU &gpu) : gpu(gpu) {}
 
     std::shared_ptr<TextureView> TextureManager::FindOrCreate(const GuestTexture &guestTexture, ContextTag tag) {
         TRACE_EVENT("gpu", "TextureManager::FindOrCreate");
+        if (dbg::Mask() & 0x400u)
+            dbg::WaitLastSubmit();
 
         auto guestMapping{guestTexture.mappings.front()};
 
