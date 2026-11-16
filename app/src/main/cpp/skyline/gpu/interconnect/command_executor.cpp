@@ -13,6 +13,7 @@
 #include "command_executor.h"
 #include <nce.h>
 #include <gpu/render_resolution.h>
+#include <gpu/dbg_toggle.h>
 
 namespace skyline::gpu::interconnect {
     static void RecordFullBarrier(vk::raii::CommandBuffer &commandBuffer) {
@@ -395,7 +396,7 @@ namespace skyline::gpu::interconnect {
                 if (sampled && output && sampled->texture == output->texture)
                     allowResolutionScaling = false; // Attachment feedback must use the original image.
 
-        bool splitRenderPass{renderPass == nullptr || renderPass->renderArea != renderArea || renderPass->allowResolutionScaling != allowResolutionScaling || !attachmentsMatch ||
+        bool splitRenderPass{renderPass == nullptr || (dbg::Mask() & 4u) || renderPass->renderArea != renderArea || renderPass->allowResolutionScaling != allowResolutionScaling || !attachmentsMatch ||
             !ranges::all_of(outputAttachmentViews, [this] (auto view) { return !view || view->texture->ValidateRenderPassUsage(renderPassIndex, texture::RenderPassUsage::RenderTarget); }) ||
             !ranges::all_of(sampledImages, [this] (auto view) { return view->texture->ValidateRenderPassUsage(renderPassIndex, texture::RenderPassUsage::Sampled); })};
 
@@ -567,7 +568,11 @@ namespace skyline::gpu::interconnect {
 
     void CommandExecutor::AddClearColorSubpass(TextureView *attachment, const vk::ClearColorValue &value) {
         bool gotoNext{CreateRenderPassWithSubpass(vk::Rect2D{.extent = attachment->texture->dimensions}, {}, {}, attachment, nullptr, false, {}, {}, true)};
-        if (renderPass->ClearColorAttachment(0, value, gpu)) {
+        const bool dbgRetro{!gotoNext && !std::holds_alternative<node::RenderPassNode>(slot->nodes.back())};
+        const bool dbgMerged{!(dbgRetro && (dbg::Mask() & 2u)) && renderPass->ClearColorAttachment(0, value, gpu)};
+        if (dbgRetro)
+            dbg::NoteClearAfterDraw(dbgMerged, "color");
+        if (dbgMerged) {
             if (gotoNext)
                 slot->nodes.emplace_back(std::in_place_type_t<node::NextSubpassNode>());
         } else {
@@ -592,7 +597,11 @@ namespace skyline::gpu::interconnect {
 
     void CommandExecutor::AddClearDepthStencilSubpass(TextureView *attachment, const vk::ClearDepthStencilValue &value) {
         bool gotoNext{CreateRenderPassWithSubpass(vk::Rect2D{.extent = attachment->texture->dimensions}, {}, {}, {}, attachment, false, {}, {}, true)};
-        if (renderPass->ClearDepthStencilAttachment(value, gpu)) {
+        const bool dbgRetro{!gotoNext && !std::holds_alternative<node::RenderPassNode>(slot->nodes.back())};
+        const bool dbgMerged{!(dbgRetro && (dbg::Mask() & 2u)) && renderPass->ClearDepthStencilAttachment(value, gpu)};
+        if (dbgRetro)
+            dbg::NoteClearAfterDraw(dbgMerged, "depth");
+        if (dbgMerged) {
             if (gotoNext)
                 slot->nodes.emplace_back(std::in_place_type_t<node::NextSubpassNode>());
         } else {
@@ -742,8 +751,9 @@ namespace skyline::gpu::interconnect {
 
         ResetInternal();
 
-        if (wait) {
-            usageTracker.dirtyIntervals.Clear();
+        if (wait || (dbg::Mask() & 1u)) {
+            if (wait)
+                usageTracker.dirtyIntervals.Clear();
 
             std::condition_variable cv;
             std::mutex mutex;
