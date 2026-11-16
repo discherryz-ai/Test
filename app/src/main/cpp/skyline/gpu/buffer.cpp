@@ -8,6 +8,7 @@
 #include <common/trace.h>
 #include <common/settings.h>
 #include "buffer.h"
+#include <gpu/dbg_toggle.h>
 
 namespace skyline::gpu {
     void Buffer::ResetMegabufferState() {
@@ -191,6 +192,9 @@ namespace skyline::gpu {
     }
 
     bool Buffer::ValidateMegaBufferView(vk::DeviceSize size) {
+        if (dbg::Mask() & 0x20u)
+            return false;
+
         return isDirect ? ValidateMegaBufferViewImplDirect(size) : ValidateMegaBufferViewImplStaged(size);
     }
 
@@ -228,7 +232,7 @@ namespace skyline::gpu {
                 // Skip updating backing if the changes are gonna be updated later by SynchroniseHost in executor anyway
                 return;
 
-            if (!SequencedCpuBackingWritesBlocked() && PollFence())
+            if (!SequencedCpuBackingWritesBlocked() && !(dbg::Mask() & 0x80u) && PollFence())
                 // We can write directly to the backing as long as this resource isn't being actively used by a past workload (in the current context or another)
                 std::memcpy(backing->data() + dstOffset, src->mirror.data() + srcOffset, size);
             else
@@ -292,7 +296,7 @@ namespace skyline::gpu {
             // Skip updating backing if the changes are gonna be updated later by SynchroniseHost in executor anyway
             return false;
 
-        if (!SequencedCpuBackingWritesBlocked() && PollFence()) {
+        if (!SequencedCpuBackingWritesBlocked() && !(dbg::Mask() & 0x80u) && PollFence()) {
             // We can write directly to the backing as long as this resource isn't being actively used by a past workload (in the current context or another)
             std::memcpy(backing->data() + offset, data.data(), data.size());
         } else {
@@ -419,6 +423,11 @@ namespace skyline::gpu {
     bool Buffer::PollFence() {
         if (!cycle)
             return true;
+
+        if (dbg::Mask() & 0x100u) {
+            WaitOnFence();
+            return true;
+        }
 
         if (cycle->Poll()) {
             cycle = nullptr;

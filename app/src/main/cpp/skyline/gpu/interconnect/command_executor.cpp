@@ -106,6 +106,7 @@ namespace skyline::gpu::interconnect {
         auto &gpu{*state.gpu};
 
         renderResolutionState = {}; // Dynamic state is local to this command buffer.
+        const u32 dbgMask{dbg::Mask()};
         node::RenderPassNode *activeRenderPass{};
         vk::RenderPass lRenderPass;
         u32 subpassIndex;
@@ -124,7 +125,11 @@ namespace skyline::gpu::interconnect {
             std::visit(VariantVisitor{
                 [&](FunctionNode &node) {
                     TRACE_EVENT_INSTANT("gpu", "FunctionNode");
+                    if ((dbgMask & 0x10u) && !activeRenderPass)
+                        RecordFullBarrier(slot->commandBuffer);
                     node(slot->commandBuffer, slot->cycle, gpu);
+                    if ((dbgMask & 0x10u) && !activeRenderPass)
+                        RecordFullBarrier(slot->commandBuffer);
                 },
 
                 [&](CheckpointNode &node) {
@@ -147,6 +152,8 @@ namespace skyline::gpu::interconnect {
 
                 [&](RenderPassNode &node) {
                     TRACE_EVENT_INSTANT("gpu", "RenderPassNode");
+                    if (dbgMask & 0x10u)
+                        RecordFullBarrier(slot->commandBuffer);
                     activeRenderPass = &node;
                     lRenderPass = node(slot->commandBuffer, slot->cycle, gpu);
                     subpassIndex = 0;
@@ -173,6 +180,8 @@ namespace skyline::gpu::interconnect {
                     node(slot->commandBuffer, slot->cycle, gpu);
                     if (activeRenderPass) activeRenderPass->ResolveResolution(slot->commandBuffer, gpu);
                     activeRenderPass = nullptr;
+                    if (dbgMask & 0x10u)
+                        RecordFullBarrier(slot->commandBuffer);
                 },
             }, node);
             #undef NODE
@@ -716,6 +725,7 @@ namespace skyline::gpu::interconnect {
             flushCallback();
 
         executionTag = AllocateTag();
+        auto dbgSubmitCycle{cycle};
 
         // Ensure all pushed callbacks wait for the submission to have finished GPU execution
         if (!slot->nodes.empty())
@@ -736,6 +746,8 @@ namespace skyline::gpu::interconnect {
             TRACE_EVENT("gpu", "CommandExecutor::Submit");
             SubmitInternal();
             submissionNumber++;
+            if (dbg::Mask() & 0x40u)
+                dbgSubmitCycle->WaitSubmit();
         }
 
         if (!*state.settings->useDirectMemoryImport) {
