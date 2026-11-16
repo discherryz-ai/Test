@@ -4,6 +4,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <thread>
 #include <functional>
 #include <mutex>
 #include <cstdio>
@@ -101,8 +104,18 @@ namespace skyline::dbg {
             std::scoped_lock lock{LastSubmitMutex()};
             waiter = LastSubmitWaiter();
         }
-        if (waiter)
+        if (waiter) {
+            static std::atomic<std::uint64_t> calls{0}, blockedUs{0}, blockedCalls{0};
+            auto start{std::chrono::steady_clock::now()};
             waiter();
+            auto us{static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count())};
+            if (us > 50)
+                blockedCalls.fetch_add(1, std::memory_order_relaxed);
+            blockedUs.fetch_add(us, std::memory_order_relaxed);
+            std::uint64_t n{calls.fetch_add(1, std::memory_order_relaxed) + 1};
+            if ((n % 2048) == 0)
+                LOGW("DBG lazy-wait stats: calls={} blocked_calls={} total_blocked_ms={}", n, blockedCalls.load(std::memory_order_relaxed), blockedUs.load(std::memory_order_relaxed) / 1000);
+        }
     }
 
     /**

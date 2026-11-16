@@ -107,6 +107,8 @@ namespace skyline::gpu::interconnect {
 
         renderResolutionState = {}; // Dynamic state is local to this command buffer.
         const u32 dbgMask{dbg::Mask()};
+        if (dbgMask & 0x20000u)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         node::RenderPassNode *activeRenderPass{};
         vk::RenderPass lRenderPass;
         u32 subpassIndex;
@@ -192,6 +194,8 @@ namespace skyline::gpu::interconnect {
         slot->commandBuffer.end();
         slot->ready = false;
 
+        if (dbgMask & 0x40000u)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         gpu.scheduler.SubmitCommandBuffer(slot->commandBuffer, slot->cycle);
 
         slot->nodes.clear();
@@ -536,6 +540,8 @@ namespace skyline::gpu::interconnect {
     }
 
     void CommandExecutor::AddSubpass(std::function<void(vk::raii::CommandBuffer &, const std::shared_ptr<FenceCycle> &, GPU &, vk::RenderPass, u32)> &&function, vk::Rect2D renderArea, span<TextureView *> sampledImages, span<TextureView *> inputAttachments, span<TextureView *> colorAttachments, TextureView *depthStencilAttachment, bool noSubpassCreation, vk::PipelineStageFlags srcStageMask, vk::PipelineStageFlags dstStageMask, bool allowResolutionScaling) {
+        if (dbg::Mask() & 0x2000u)
+            dbg::WaitLastSubmit();
         bool gotoNext{CreateRenderPassWithSubpass(renderArea, sampledImages, inputAttachments, colorAttachments, depthStencilAttachment ? &*depthStencilAttachment : nullptr, noSubpassCreation, srcStageMask, dstStageMask, allowResolutionScaling)};
         if (gotoNext)
             slot->nodes.emplace_back(std::in_place_type_t<node::NextSubpassFunctionNode>(), std::forward<decltype(function)>(function));
@@ -547,6 +553,8 @@ namespace skyline::gpu::interconnect {
     }
 
     void CommandExecutor::AddOutsideRpCommand(std::function<void(vk::raii::CommandBuffer &, const std::shared_ptr<FenceCycle> &, GPU &)> &&function) {
+        if (dbg::Mask() & 0x8000u)
+            dbg::WaitLastSubmit();
         if (renderPass)
             FinishRenderPass();
 
@@ -554,6 +562,8 @@ namespace skyline::gpu::interconnect {
     }
 
     void CommandExecutor::AddCommand(std::function<void(vk::raii::CommandBuffer &, const std::shared_ptr<FenceCycle> &, GPU &)> &&function) {
+        if (dbg::Mask() & 0x8000u)
+            dbg::WaitLastSubmit();
         slot->nodes.emplace_back(std::in_place_type_t<node::FunctionNode>(), std::forward<decltype(function)>(function));
     }
 
@@ -576,6 +586,8 @@ namespace skyline::gpu::interconnect {
     }
 
     void CommandExecutor::AddClearColorSubpass(TextureView *attachment, const vk::ClearColorValue &value) {
+        if (dbg::Mask() & 0x2000u)
+            dbg::WaitLastSubmit();
         bool gotoNext{CreateRenderPassWithSubpass(vk::Rect2D{.extent = attachment->texture->dimensions}, {}, {}, attachment, nullptr, false, {}, {}, true)};
         const bool dbgRetro{!gotoNext && !std::holds_alternative<node::RenderPassNode>(slot->nodes.back())};
         const bool dbgMerged{!(dbgRetro && (dbg::Mask() & 2u)) && renderPass->ClearColorAttachment(0, value, gpu)};
@@ -605,6 +617,8 @@ namespace skyline::gpu::interconnect {
     }
 
     void CommandExecutor::AddClearDepthStencilSubpass(TextureView *attachment, const vk::ClearDepthStencilValue &value) {
+        if (dbg::Mask() & 0x2000u)
+            dbg::WaitLastSubmit();
         bool gotoNext{CreateRenderPassWithSubpass(vk::Rect2D{.extent = attachment->texture->dimensions}, {}, {}, {}, attachment, false, {}, {}, true)};
         const bool dbgRetro{!gotoNext && !std::holds_alternative<node::RenderPassNode>(slot->nodes.back())};
         const bool dbgMerged{!(dbgRetro && (dbg::Mask() & 2u)) && renderPass->ClearDepthStencilAttachment(value, gpu)};
@@ -726,6 +740,7 @@ namespace skyline::gpu::interconnect {
 
         executionTag = AllocateTag();
         auto dbgSubmitCycle{cycle};
+        bool dbgDidSubmit{};
 
         // Ensure all pushed callbacks wait for the submission to have finished GPU execution
         if (!slot->nodes.empty())
@@ -746,17 +761,20 @@ namespace skyline::gpu::interconnect {
             TRACE_EVENT("gpu", "CommandExecutor::Submit");
             SubmitInternal();
             submissionNumber++;
+            dbgDidSubmit = true;
             {
                 const u32 dbgM{dbg::Mask()};
                 if (!(dbgM & 0x4000u) || (dbgM & 0x40u))
                     dbgSubmitCycle->WaitSubmit();
-                else if (dbgM & (0x200u | 0x400u | 0x1000u))
+                else if (dbgM & (0x200u | 0x400u | 0x1000u | 0x2000u | 0x8000u | 0x80000u))
                     dbg::SetLastSubmit([dbgSubmitCycle] { dbgSubmitCycle->WaitSubmit(); });
             }
         }
 
         if (!*state.settings->useDirectMemoryImport) {
             // When DMI is not in use, execute callbacks immediately after submission
+            if (dbgDidSubmit && (dbg::Mask() & 0x100000u) && (callback || !pendingDeferredActions.empty()))
+                dbgSubmitCycle->WaitSubmit();
             for (auto &actionCb : pendingDeferredActions)
                 actionCb();
 

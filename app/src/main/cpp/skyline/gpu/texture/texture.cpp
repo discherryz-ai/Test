@@ -10,6 +10,7 @@
 #include <gpu/render_resolution.h>
 #include <gpu/resolution_blit.h>
 #include "layout.h"
+#include <gpu/dbg_toggle.h>
 #include "adreno_aliasing.h"
 #include "bc_decoder.h"
 #include "format.h"
@@ -816,6 +817,8 @@ namespace skyline::gpu {
         TRACE_EVENT("gpu", "Texture::TransitionLayout");
 
         if (layout != pLayout) {
+            if (dbg::Mask() & 0x80000u)
+                dbg::WaitLastSubmit();
             auto lCycle{gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
                 commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, vk::ImageMemoryBarrier{
                     .image = GetBacking(),
@@ -886,6 +889,8 @@ namespace skyline::gpu {
         if (stagingBuffer) {
             if (cycle)
                 cycle->WaitSubmit();
+            if (dbg::Mask() & 0x80000u)
+                dbg::WaitLastSubmit();
             auto lCycle{gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
                 CopyFromStagingBuffer(commandBuffer, stagingBuffer);
             })};
@@ -986,6 +991,8 @@ namespace skyline::gpu {
                 downloadStagingBuffer = gpu.memory.AllocateStagingBuffer(surfaceSize);
 
             WaitOnFence();
+            if (dbg::Mask() & 0x80000u)
+                dbg::WaitLastSubmit();
             auto lCycle{gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
                 CopyIntoStagingBuffer(commandBuffer, downloadStagingBuffer);
             })};
@@ -1031,6 +1038,8 @@ namespace skyline::gpu {
     }
 
     void Texture::CopyFrom(std::shared_ptr<Texture> source, vk::Semaphore waitSemaphore, vk::Semaphore signalSemaphore, texture::Format srcFormat, const vk::ImageSubresourceRange &subresource) {
+        if (dbg::Mask() & 0x80000u)
+            dbg::WaitLastSubmit();
         if (cycle)
             cycle->WaitSubmit();
         if (source->cycle)
