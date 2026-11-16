@@ -110,6 +110,36 @@ namespace skyline::gpu {
             }
          }
 
+        {
+            const bool dbgChosen{static_cast<bool>(layerMipMatch) || static_cast<bool>(fullMatch)};
+            if (!matches.empty() || !dbgChosen) {
+                static u64 dbgKeys[256]{};
+                static u32 dbgCounts[256]{};
+                static u32 dbgUsed{};
+                const u64 chosenPtr{static_cast<u64>(reinterpret_cast<uintptr_t>(layerMipMatch ? layerMipMatch.get() : fullMatch.get()))};
+                u64 aPtr{}, aW{}, aH{};
+                int aFmt{};
+                if (!matches.empty() && matches[0]->guest) {
+                    aPtr = static_cast<u64>(reinterpret_cast<uintptr_t>(matches[0].get()));
+                    aW = static_cast<u64>(matches[0]->guest->dimensions.width);
+                    aH = static_cast<u64>(matches[0]->guest->dimensions.height);
+                    aFmt = static_cast<int>(matches[0]->guest->format->vkFormat);
+                }
+                const u64 parts[]{static_cast<u64>(reinterpret_cast<uintptr_t>(guestMapping.data())), static_cast<u64>(guestMapping.size()), static_cast<u64>(static_cast<int>(guestTexture.format->vkFormat)), static_cast<u64>(guestTexture.dimensions.width), static_cast<u64>(guestTexture.dimensions.height), chosenPtr, static_cast<u64>(matches.size()), aPtr};
+                u64 key{1469598103934665603ULL};
+                for (u64 part : parts)
+                    key = (key ^ part) * 1099511628211ULL;
+                u32 idx{dbgUsed};
+                for (u32 i{}; i < dbgUsed; i++)
+                    if (dbgKeys[i] == key) { idx = i; break; }
+                if (idx == dbgUsed && dbgUsed < 256) { dbgKeys[dbgUsed] = key; dbgUsed++; }
+                if (idx < 256) {
+                    u32 n{++dbgCounts[idx]};
+                    if (n <= 5 || (n & (n - 1)) == 0)
+                        LOGW("DBG TexMgr {} n={} addr=0x{:x} size={} req={}x{} fmt={} chosen=0x{:x} aliases={} alias0=0x{:x} {}x{} fmt={}", dbgChosen ? "ALIAS_IGNORED" : "CREATE", n, parts[0], parts[1], static_cast<u32>(guestTexture.dimensions.width), static_cast<u32>(guestTexture.dimensions.height), static_cast<int>(guestTexture.format->vkFormat), chosenPtr, matches.size(), aPtr, static_cast<u32>(aW), static_cast<u32>(aH), aFmt);
+                }
+            }
+        }
         if (layerMipMatch) {
             ContextLock textureLock{tag, *layerMipMatch};
             return layerMipMatch->GetView(guestTexture.viewType, vk::ImageSubresourceRange{
