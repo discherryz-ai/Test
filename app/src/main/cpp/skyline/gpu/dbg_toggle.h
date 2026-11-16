@@ -203,4 +203,40 @@ namespace skyline::dbg {
         if (n <= 5 || (n % 512) == 0)
             LOGW("DBG xexec: calls={} blocked={} blocked_ms={} others={}", n, blocked.load(std::memory_order_relaxed), blockedUs.load(std::memory_order_relaxed) / 1000, waiters.size());
     }
+
+    /**
+     * @brief Собирает «как дождаться» для всех ДРУГИХ исполнителей, не ожидая сейчас (ожидание выполнит поток записи через RunWaiters)
+     */
+    inline std::vector<std::function<void()>> CollectOthers(const void *self) {
+        std::vector<std::function<void()>> waiters;
+        std::scoped_lock lock{SignalMutex()};
+        for (auto &entry : SignalEntries())
+            if (entry.owner != self && entry.wait)
+                waiters.push_back(entry.wait);
+        return waiters;
+    }
+
+    /**
+     * @brief Выполняет собранные ожидания (вызывается потоком записи перед отправкой буфера команд в очередь GPU) и очищает список
+     */
+    inline void RunWaiters(std::vector<std::function<void()>> &waiters) {
+        if (waiters.empty())
+            return;
+
+        static std::atomic<std::uint64_t> calls{0}, blocked{0}, blockedUs{0};
+        auto start{std::chrono::steady_clock::now()};
+        for (auto &waiter : waiters)
+            waiter();
+        auto us{static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count())};
+        const auto others{waiters.size()};
+        waiters.clear();
+
+        std::uint64_t n{calls.fetch_add(1, std::memory_order_relaxed) + 1};
+        if (us > 50) {
+            blocked.fetch_add(1, std::memory_order_relaxed);
+            blockedUs.fetch_add(us, std::memory_order_relaxed);
+        }
+        if (n <= 5 || (n % 512) == 0)
+            LOGW("DBG xexec-rec: calls={} blocked={} blocked_ms={} others={}", n, blocked.load(std::memory_order_relaxed), blockedUs.load(std::memory_order_relaxed) / 1000, others);
+    }
 }

@@ -53,6 +53,7 @@ namespace skyline::gpu::interconnect {
             bool ready{}; //!< If this slot's command buffer has had 'beginCommandBuffer' called and is ready to have commands recorded into it
             bool capture{}; //!< If this slot's Vulkan commands should be captured using the renderdoc API
             bool didWait{}; //!< If a wait of time longer than GrowThresholdNs occured when this slot was acquired
+            std::vector<std::function<void()>> dbgWaitBeforeSubmit; //!< DBG: waits for other executors' submissions that the record thread must finish before submitting this slot
 
             Slot(GPU &gpu);
 

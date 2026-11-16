@@ -196,6 +196,7 @@ namespace skyline::gpu::interconnect {
 
         if (dbgMask & 0x40000u)
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        dbg::RunWaiters(slot->dbgWaitBeforeSubmit); // DBG 0x40000000: other executors' work that the guest already knows is done must reach the GPU queue first
         gpu.scheduler.SubmitCommandBuffer(slot->commandBuffer, slot->cycle);
 
         slot->nodes.clear();
@@ -833,8 +834,13 @@ namespace skyline::gpu::interconnect {
         }
 
         // DBG 0x20000000: never hand our command buffer to the GPU queue before another executor's work that the guest was already told is done
-        if ((dbg::Mask() & 0x20000000u) && !slot->nodes.empty())
-            dbg::WaitOthers(this);
+        if (!slot->nodes.empty()) {
+            const u32 dbgCross{dbg::Mask()};
+            if (dbgCross & 0x20000000u)
+                dbg::WaitOthers(this); // blocks the guest thread
+            else if (dbgCross & 0x40000000u)
+                slot->dbgWaitBeforeSubmit = dbg::CollectOthers(this); // only the record thread waits, right before it submits
+        }
 
         if (!slot->nodes.empty()) {
             TRACE_EVENT("gpu", "CommandExecutor::Submit");
@@ -851,7 +857,7 @@ namespace skyline::gpu::interconnect {
             }
         }
 
-        if ((dbg::Mask() & 0x20000000u) && (callback || !pendingDeferredActions.empty())) {
+        if ((dbg::Mask() & 0x60000000u) && (callback || !pendingDeferredActions.empty())) {
             // The guest is about to be told that our work is done: other executors must not submit before our last command buffer is in the queue
             const auto &lastCycle{signalThread.LastSubmitted()};
             if (lastCycle)
