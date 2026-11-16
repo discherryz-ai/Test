@@ -258,6 +258,7 @@ namespace skyline::gpu::interconnect {
         std::vector<std::function<void()>> pipelineChangeCallbacks; //!< Set of persistent callbacks that will be called after any non-Maxwell 3D engine changes the active pipeline
 
         std::vector<std::function<void()>> pendingDeferredActions;
+        std::vector<u32> pendingDeferredKinds; //!< DBG: kind of every pending deferred action (1-4 = engine sites, 0 = unknown), parallel to pendingDeferredActions
 
         u32 nextCheckpointId{}; //!< The ID of the next debug checkpoint to be allocated
 
@@ -436,7 +437,7 @@ namespace skyline::gpu::interconnect {
         /**
          * @brief Adds an action to be executed upon current cycle completion (if DMI is on, otherwise after submission)
          */
-        void AddDeferredAction(std::function<void()> &&callback);
+        void AddDeferredAction(std::function<void()> &&callback, u32 kind = 0);
 
         /**
          * @brief Locks all preserve attached buffers/textures

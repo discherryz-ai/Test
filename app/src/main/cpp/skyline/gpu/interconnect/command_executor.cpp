@@ -850,11 +850,28 @@ namespace skyline::gpu::interconnect {
             // When DMI is not in use, execute callbacks immediately after submission
             if (dbg::Mask() & 0x800000u) {
                 // Notify the guest from a separate thread, but only once the command buffer has really been submitted to the GPU queue
-                std::vector<std::function<void()>> actions{std::move(pendingDeferredActions)};
+                // DBG: bits 0x1000000..0x10000000 pick which kinds of signals are delayed (none picked = delay everything)
+                const u32 delayMask{dbg::Mask() & 0x1F000000u};
+                const auto shouldDelay{[delayMask](u32 kind) {
+                    return delayMask == 0 || kind == 0 || (kind <= 5 && (delayMask & (0x1000000u << (kind - 1))));
+                }};
+
+                std::vector<std::function<void()>> actions;
+                std::vector<std::function<void()>> immediate;
+                pendingDeferredKinds.resize(pendingDeferredActions.size(), 0);
+                for (size_t i{}; i < pendingDeferredActions.size(); i++)
+                    (shouldDelay(pendingDeferredKinds[i]) ? actions : immediate).emplace_back(std::move(pendingDeferredActions[i]));
                 pendingDeferredActions.clear();
-                if (callback)
-                    actions.emplace_back(std::move(callback));
+                if (callback) {
+                    if (shouldDelay(5))
+                        actions.emplace_back(std::move(callback));
+                    else
+                        immediate.emplace_back(std::move(callback));
+                }
+
                 signalThread.QueueAfterLastSubmit(std::move(actions));
+                for (auto &immediateCb : immediate)
+                    immediateCb();
             } else {
                 signalThread.Flush(); // Keep ordering if the mode was just switched at runtime
                 if (dbgDidSubmit && (dbg::Mask() & 0x100000u) && (callback || !pendingDeferredActions.empty()))
@@ -869,6 +886,7 @@ namespace skyline::gpu::interconnect {
             }
         }
 
+        pendingDeferredKinds.clear();
         ResetInternal();
 
         if (wait)
@@ -893,8 +911,10 @@ namespace skyline::gpu::interconnect {
         }
     }
 
-    void CommandExecutor::AddDeferredAction(std::function<void()> &&callback) {
+    void CommandExecutor::AddDeferredAction(std::function<void()> &&callback, u32 kind) {
         pendingDeferredActions.emplace_back(std::move(callback));
+        pendingDeferredKinds.resize(pendingDeferredActions.size(), 0);
+        pendingDeferredKinds.back() = kind;
     }
 
     void CommandExecutor::LockPreserve() {

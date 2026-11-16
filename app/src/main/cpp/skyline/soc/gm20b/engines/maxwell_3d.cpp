@@ -266,7 +266,7 @@ namespace skyline::soc::gm20b::engine::maxwell3d {
                 LOGD("Increment syncpoint: {}", static_cast<u16>(syncpointAction.id));
                 channelCtx.executor.AddDeferredAction([=, syncpoints = &this->syncpoints, index = syncpointAction.id]() {
                     syncpoints->at(index).host.Increment();
-                });
+                }, 1);
                 syncpoints.at(syncpointAction.id).guest.Increment();
             })
 
@@ -401,7 +401,7 @@ namespace skyline::soc::gm20b::engine::maxwell3d {
                     case type::SemaphoreInfo::Op::Release:
                         channelCtx.executor.AddDeferredAction([=, this, semaphore = *registers.semaphore]() {
                             WriteSemaphoreResult(semaphore, semaphore.payload);
-                        });
+                        }, 3);
                         break;
 
                     case type::SemaphoreInfo::Op::Counter: {
@@ -409,7 +409,7 @@ namespace skyline::soc::gm20b::engine::maxwell3d {
                             case type::SemaphoreInfo::CounterType::Zero:
                                 channelCtx.executor.AddDeferredAction([=, this, semaphore = *registers.semaphore]() {
                                     WriteSemaphoreResult(semaphore, semaphore.payload);
-                                });
+                                }, 3);
                                 break;
                             case type::SemaphoreInfo::CounterType::SamplesPassed:
                                 // Return a fake result for now

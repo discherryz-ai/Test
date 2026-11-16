@@ -21,7 +21,7 @@ namespace skyline::soc::gm20b::engine {
                     LOGD("Increment syncpoint: {}", +action.index);
                     channelCtx.executor.AddDeferredAction([=, syncpoints = &this->syncpoints, index = action.index]() {
                         syncpoints->at(index).host.Increment();
-                    });
+                    }, 2);
                     syncpoints.at(action.index).guest.Increment();
                 } else if (action.operation == Registers::Syncpoint::Operation::Wait) {
                     LOGD("Wait syncpoint: {}, thresh: {}", +action.index, registers.syncpoint->payload);
@@ -58,7 +58,7 @@ namespace skyline::soc::gm20b::engine {
                             }
 
                             channelCtx.asCtx->gmmu.Write(address, payload);
-                        });
+                        }, 4);
 
                         LOGD("SemaphoreRelease: address: 0x{:X} payload: {}", address, registers.semaphore->payload);
                         break;
