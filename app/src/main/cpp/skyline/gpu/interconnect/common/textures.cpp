@@ -207,7 +207,7 @@ namespace skyline::gpu::interconnect {
         constexpr vk::ImageLayout NullImageInitialLayout{vk::ImageLayout::eUndefined};
         constexpr vk::ImageTiling NullImageTiling{vk::ImageTiling::eOptimal};
         constexpr vk::ImageCreateFlags NullImageFlags{};
-        constexpr vk::ImageUsageFlags NullImageUsage{vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled};
+        constexpr vk::ImageUsageFlags NullImageUsage{vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst};
 
         auto vkImage{ctx.gpu.memory.AllocateImage(
             {
@@ -229,6 +229,20 @@ namespace skyline::gpu::interconnect {
 
         auto nullTexture{std::make_shared<Texture>(ctx.gpu, std::move(vkImage), NullImageDimensions, NullImageFormat, NullImageInitialLayout, NullImageTiling, NullImageFlags, NullImageUsage)};
         nullTexture->TransitionLayout(vk::ImageLayout::eGeneral);
+
+        // DBG: the null texture used to be left uninitialised, fill it with bright magenta so that every use of it is clearly visible
+        {
+            auto clearCycle{ctx.gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
+                commandBuffer.clearColorImage(nullTexture->GetBacking(), vk::ImageLayout::eGeneral, vk::ClearColorValue{std::array<float, 4>{1.0f, 0.0f, 1.0f, 1.0f}}, vk::ImageSubresourceRange{
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .levelCount = 1,
+                    .layerCount = 1,
+                });
+            })};
+            clearCycle->AttachObject(nullTexture);
+            clearCycle->Wait();
+        }
+
         return nullTexture->GetView(vk::ImageViewType::e2D, vk::ImageSubresourceRange{
             .aspectMask = vk::ImageAspectFlagBits::eColor,
             .levelCount = 1,
@@ -357,7 +371,7 @@ namespace skyline::gpu::interconnect {
             auto mappings{ctx.channelCtx.asCtx->gmmu.TranslateRange(textureHeader.Iova(), guest.GetSize())};
             guest.mappings.assign(mappings.begin(), mappings.end());
             if (guest.mappings.empty() || !std::all_of(guest.mappings.begin(), guest.mappings.end(), [](auto map) { return map.valid(); }) || guest.mappings.front().empty()) {
-                LOGW("Unmapped texture in pool: 0x{:X}", textureHeader.Iova());
+                LOGW("Unmapped texture in pool: 0x{:X} index={} {}x{} fmt={} type={} headerType={} size={} mappings={}", textureHeader.Iova(), index, guest.dimensions.width, guest.dimensions.height, vk::to_string(guest.format->vkFormat), static_cast<u32>(textureHeader.textureType), static_cast<u32>(textureHeader.headerType), guest.GetSize(), guest.mappings.size());
                 if (!nullTextureView)
                     nullTextureView = CreateNullTexture(ctx);
 

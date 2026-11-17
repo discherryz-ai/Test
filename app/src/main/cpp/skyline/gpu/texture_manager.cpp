@@ -27,8 +27,8 @@ namespace skyline::gpu {
         }
 
         constexpr size_t MaxTotalBytes{384ULL * 1024 * 1024};
-        size_t dumpedCount{}, dumpedBytes{}, skippedCount{};
-        fputs("# id guestAddr guestFormat hostFormat WxHxD levels layers tiling layout dirty scaled status file\n", index);
+        size_t dumpedCount{}, dumpedBytes{}, skippedCount{}, guestDumpedBytes{};
+        fputs("# id guestAddr guestFormat hostFormat WxHxD levels layers tiling layout dirty scaled status file [mode bh bd pitch gdim glayers gbase gstride gmips gviewmip gmaps gsize gfile]\n", index);
 
         for (size_t i{}; i < unique.size(); i++) {
             auto &texture{*unique[i]};
@@ -89,10 +89,44 @@ namespace skyline::gpu {
                 }
             }
 
+            std::string guestInfo{"-"};
+            if (texture.guest && status != "LOCKED_BY_OTHER") {
+                try {
+                    auto &guestTexture{*texture.guest};
+                    const auto tileMode{guestTexture.tileConfig.mode};
+                    const bool isBlock{tileMode == texture::TileMode::Block}, isPitch{tileMode == texture::TileMode::Pitch};
+                    const u32 guestStride{guestTexture.GetLayerStride()};
+                    const size_t guestSize{std::min<size_t>(texture.mirror.size(), guestTexture.GetSize())};
+
+                    std::string guestFile{"-"};
+                    if (guestTexture.format != texture.format && texture.mirror.valid() && guestSize != 0 && guestSize <= maxBytes && guestDumpedBytes + guestSize <= MaxTotalBytes) {
+                        auto guestName{fmt::format("{:04}_{:x}.guest", i, reinterpret_cast<uintptr_t>(guestTexture.mappings.front().data()))};
+                        if (FILE *file{fopen((directory + "/" + guestName).c_str(), "wb")}) {
+                            fwrite(texture.mirror.data(), 1, guestSize, file);
+                            fclose(file);
+                            guestDumpedBytes += guestSize;
+                            guestFile = guestName;
+                        }
+                    }
+
+                    guestInfo = fmt::format("mode={} bh={} bd={} pitch={} gdim={}x{}x{} glayers={} gbase={} gstride={} gmips={} gviewmip={}+{} gmaps={} gsize={} gfile={}",
+                                            isBlock ? 'B' : (isPitch ? 'P' : 'L'),
+                                            isBlock ? static_cast<u32>(guestTexture.tileConfig.blockHeight) : 0,
+                                            isBlock ? static_cast<u32>(guestTexture.tileConfig.blockDepth) : 0,
+                                            isPitch ? guestTexture.tileConfig.pitch : 0,
+                                            guestTexture.dimensions.width, guestTexture.dimensions.height, guestTexture.dimensions.depth,
+                                            guestTexture.layerCount, guestTexture.baseArrayLayer, guestStride, guestTexture.mipLevelCount,
+                                            guestTexture.viewMipBase, guestTexture.viewMipCount,
+                                            guestTexture.mappings.size(), guestSize, guestFile);
+                } catch (const std::exception &e) {
+                    guestInfo = std::string{"guest_exception="} + e.what();
+                }
+            }
+
             if (status != "ok")
                 skippedCount++;
 
-            auto line{fmt::format("{} 0x{:x} {} {} {}x{}x{} {} {} {} {} {} {} {} {}\n",
+            auto line{fmt::format("{} 0x{:x} {} {} {}x{}x{} {} {} {} {} {} {} {} {} {}\n",
                                   i,
                                   texture.guest ? reinterpret_cast<uintptr_t>(texture.guest->mappings.front().data()) : 0,
                                   texture.guest ? vk::to_string(texture.guest->format->vkFormat) : "-",
@@ -102,7 +136,7 @@ namespace skyline::gpu {
                                   vk::to_string(texture.tiling), vk::to_string(texture.layout),
                                   static_cast<int>(texture.dirtyState),
                                   texture.scaledRenderTarget ? 1 : 0,
-                                  status, fileName)};
+                                  status, fileName, guestInfo)};
             fputs(line.c_str(), index);
 
             if (locked)
@@ -110,7 +144,7 @@ namespace skyline::gpu {
         }
 
         fclose(index);
-        LOGW("DBG texdump: {} textures total, {} dumped ({} KiB), {} skipped -> {}", unique.size(), dumpedCount, dumpedBytes / 1024, skippedCount, directory);
+        LOGW("DBG texdump: {} textures total, {} dumped ({} KiB), {} skipped, guest raw {} KiB -> {}", unique.size(), dumpedCount, dumpedBytes / 1024, skippedCount, guestDumpedBytes / 1024, directory);
     }
 
     std::shared_ptr<TextureView> TextureManager::FindOrCreate(const GuestTexture &guestTexture, ContextTag tag) {
