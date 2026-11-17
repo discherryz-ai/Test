@@ -1,11 +1,116 @@
 // SPDX-License-Identifier: MPL-2.0
 // Copyright © 2021 Skyline Team and Contributors (https://github.com/skyline-emu/)
 
+#include <sys/stat.h>
 #include <common/trace.h>
+#include <gpu.h>
 #include "texture_manager.h"
 
 namespace skyline::gpu {
     TextureManager::TextureManager(GPU &gpu) : gpu(gpu) {}
+
+    void TextureManager::DbgDumpAll(const std::string &directory, size_t maxBytes, ContextTag tag) {
+        mkdir(directory.c_str(), 0777);
+
+        std::vector<std::shared_ptr<Texture>> unique;
+        unique.reserve(textures.size());
+        for (const auto &mapping : textures)
+            if (std::find(unique.begin(), unique.end(), mapping.texture) == unique.end())
+                unique.push_back(mapping.texture);
+
+        auto indexPath{directory + "/index.txt"};
+        FILE *index{fopen(indexPath.c_str(), "w")};
+        if (!index) {
+            LOGE("DBG texdump: can't open {}: {}", indexPath, strerror(errno));
+            return;
+        }
+
+        constexpr size_t MaxTotalBytes{384ULL * 1024 * 1024};
+        size_t dumpedCount{}, dumpedBytes{}, skippedCount{};
+        fputs("# id guestAddr guestFormat hostFormat WxHxD levels layers tiling layout dirty scaled status file\n", index);
+
+        for (size_t i{}; i < unique.size(); i++) {
+            auto &texture{*unique[i]};
+            std::string status{"ok"}, fileName{"-"};
+
+            bool locked{false};
+            const bool ownedByCaller{tag && texture.tag.load() == tag};
+            if (!ownedByCaller) {
+                if (texture.try_lock())
+                    locked = true;
+                else
+                    status = "LOCKED_BY_OTHER";
+            }
+
+            if (status == "ok") {
+                try {
+                    size_t aspectCount{};
+                    for (auto aspect : {vk::ImageAspectFlagBits::eColor, vk::ImageAspectFlagBits::eDepth, vk::ImageAspectFlagBits::eStencil})
+                        if (texture.format->vkAspect & aspect)
+                            aspectCount++;
+
+                    size_t hostSize{};
+                    for (const auto &level : texture.mipLayouts)
+                        hostSize += level.targetLinearSize * texture.layerCount;
+                    hostSize *= aspectCount;
+
+                    if (!texture.GetBacking() || texture.layout == vk::ImageLayout::eUndefined)
+                        status = "UNDEFINED_CONTENT";
+                    else if (!(texture.format->vkAspect & vk::ImageAspectFlagBits::eColor) || aspectCount != 1)
+                        status = "SKIPPED_NOT_COLOUR";
+                    else if (hostSize == 0 || hostSize > maxBytes)
+                        status = "SKIPPED_SIZE_" + std::to_string(hostSize);
+                    else if (dumpedBytes + hostSize > MaxTotalBytes)
+                        status = "SKIPPED_TOTAL_LIMIT";
+
+                    if (status == "ok") {
+                        auto staging{gpu.memory.AllocateStagingBuffer(hostSize)};
+                        texture.WaitOnFence();
+                        auto copyCycle{gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
+                            texture.CopyIntoStagingBuffer(commandBuffer, staging);
+                        })};
+                        copyCycle->Wait();
+
+                        fileName = fmt::format("{:04}_{:x}_{}x{}_{}.bin", i, texture.guest ? reinterpret_cast<uintptr_t>(texture.guest->mappings.front().data()) : 0, texture.dimensions.width, texture.dimensions.height, vk::to_string(texture.format->vkFormat));
+                        auto filePath{directory + "/" + fileName};
+                        if (FILE *file{fopen(filePath.c_str(), "wb")}) {
+                            fwrite(staging->data(), 1, hostSize, file);
+                            fclose(file);
+                            dumpedCount++;
+                            dumpedBytes += hostSize;
+                        } else {
+                            status = std::string{"WRITE_FAILED_"} + strerror(errno);
+                            fileName = "-";
+                        }
+                    }
+                } catch (const std::exception &e) {
+                    status = std::string{"EXCEPTION_"} + e.what();
+                }
+            }
+
+            if (status != "ok")
+                skippedCount++;
+
+            auto line{fmt::format("{} 0x{:x} {} {} {}x{}x{} {} {} {} {} {} {} {} {}\n",
+                                  i,
+                                  texture.guest ? reinterpret_cast<uintptr_t>(texture.guest->mappings.front().data()) : 0,
+                                  texture.guest ? vk::to_string(texture.guest->format->vkFormat) : "-",
+                                  vk::to_string(texture.format->vkFormat),
+                                  texture.dimensions.width, texture.dimensions.height, texture.dimensions.depth,
+                                  texture.levelCount, texture.layerCount,
+                                  vk::to_string(texture.tiling), vk::to_string(texture.layout),
+                                  static_cast<int>(texture.dirtyState),
+                                  texture.scaledRenderTarget ? 1 : 0,
+                                  status, fileName)};
+            fputs(line.c_str(), index);
+
+            if (locked)
+                texture.unlock();
+        }
+
+        fclose(index);
+        LOGW("DBG texdump: {} textures total, {} dumped ({} KiB), {} skipped -> {}", unique.size(), dumpedCount, dumpedBytes / 1024, skippedCount, directory);
+    }
 
     std::shared_ptr<TextureView> TextureManager::FindOrCreate(const GuestTexture &guestTexture, ContextTag tag) {
         TRACE_EVENT("gpu", "TextureManager::FindOrCreate");

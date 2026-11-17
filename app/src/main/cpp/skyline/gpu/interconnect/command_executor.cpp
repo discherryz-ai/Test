@@ -10,11 +10,41 @@
 #include <loader/loader.h>
 #include <gpu.h>
 #include <dlfcn.h>
+#include <sys/system_properties.h>
 #include "command_executor.h"
 #include <nce.h>
 #include <gpu/render_resolution.h>
 
 namespace skyline::gpu::interconnect {
+    /**
+     * @brief DEBUG: Dumps all textures when the `debug.strato.dump` system property changes to a new non-empty value
+     */
+    static void DbgPollTextureDump(GPU &gpu, ContextTag tag) {
+        static std::atomic<u32> counter{};
+        if ((counter.fetch_add(1, std::memory_order_relaxed) & 0x3Fu) != 0)
+            return;
+
+        char value[PROP_VALUE_MAX]{};
+        if (!__system_property_get("debug.strato.dump", value) || !value[0])
+            return;
+
+        static std::mutex mutex;
+        static std::string lastValue;
+        std::scoped_lock lock{mutex};
+        if (lastValue == value)
+            return;
+        lastValue = value;
+
+        char maxValue[PROP_VALUE_MAX]{};
+        size_t maxKiB{1024};
+        if (__system_property_get("debug.strato.dumpmax", maxValue) && maxValue[0])
+            maxKiB = std::max<size_t>(1, strtoul(maxValue, nullptr, 10));
+
+        auto directory{fmt::format("/storage/emulated/0/Android/data/com.lukevalen.stratomali/files/texdump_{}", value)};
+        LOGW("DBG texdump: starting, directory={} maxKiB={}", directory, maxKiB);
+        gpu.texture.DbgDumpAll(directory, maxKiB * 1024, tag);
+    }
+
     static void RecordFullBarrier(vk::raii::CommandBuffer &commandBuffer) {
         commandBuffer.pipelineBarrier(
             vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands, {}, vk::MemoryBarrier{
@@ -758,6 +788,8 @@ namespace skyline::gpu::interconnect {
             std::unique_lock lock{mutex};
             cv.wait(lock, [&gpuDone] { return gpuDone; });
         }
+
+        DbgPollTextureDump(gpu, tag);
     }
 
     void CommandExecutor::AddDeferredAction(std::function<void()> &&callback) {
