@@ -36,5 +36,11 @@ namespace skyline::gpu {
          * @note The texture manager **must** be locked prior to calling this
          */
         std::shared_ptr<TextureView> FindOrCreate(const GuestTexture &guestTexture, ContextTag tag = {});
+
+        /**
+         * @brief DEBUG: Writes the host contents of every colour texture that isn't larger than `maxBytes` into `directory` (one .bin per texture plus an index.txt with the parameters of all textures)
+         * @param tag The tag of the calling context, textures already locked with it are dumped as well
+         */
+        void DbgDumpAll(const std::string &directory, size_t maxBytes, ContextTag tag);
     };
 }
