@@ -155,6 +155,7 @@ namespace skyline::nce {
                 return;
 
         if (signal != SIGINT) {
+            signal::DbgReportCrash(signal, info, ctx, "guest");
             signal::StackFrame topFrame{.lr = reinterpret_cast<void *>(ctx->uc_mcontext.pc), .next = reinterpret_cast<signal::StackFrame *>(ctx->uc_mcontext.regs[29])};
             std::string trace{state.loader->GetStackTrace(&topFrame)};
 
@@ -166,9 +167,6 @@ namespace skyline::nce {
             for (size_t index{}; index < (sizeof(mcontext_t::regs) / sizeof(u64)); index += 2)
                 cpuContext += fmt::format("\n  X{:<2}: 0x{:<16X} X{:<2}: 0x{:X}", index, mctx.regs[index], index + 1, mctx.regs[index + 1]);
 
-            __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "guest thread #%d crashed: signal %d pc 0x%llx fault 0x%llx lr 0x%llx",
-                                static_cast<int>(state.thread->id), signal, static_cast<unsigned long long>(mctx.pc),
-                                static_cast<unsigned long long>(mctx.fault_address), static_cast<unsigned long long>(mctx.regs[30]));
             LOGE("Thread #{} has crashed due to signal: {}\nStack Trace:{}\nCPU Context:{}", state.thread->id, strsignal(signal), trace, cpuContext);
 
             if (state.thread->id) {
@@ -187,6 +185,8 @@ namespace skyline::nce {
     void NCE::HostSignalHandler(int signal, siginfo *info, ucontext *ctx) {
         if (TrapManager::TrapHandler(reinterpret_cast<u8 *>(info->si_addr), true))
             return;
+
+        signal::DbgReportCrash(signal, info, ctx, "host");
 
         bool runningUnderDebugger{[]() {
             static std::ifstream status("/proc/self/status");

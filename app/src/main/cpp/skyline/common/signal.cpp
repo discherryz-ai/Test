@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <cxxabi.h>
 #include <sys/prctl.h>
+#include <sys/uio.h>
 #include <android/log.h>
 #include "signal.h"
 
@@ -88,13 +89,25 @@ namespace skyline::signal {
      * @brief DEBUG: Writes the fault location and a frame-pointer backtrace (library + offset) to logcat
      * @note Uses only dladdr and __android_log_print so it works even when the fault is inside a driver thread
      */
-    static void DbgReportCrash(int signal, siginfo *info, ucontext *context) {
+    void DbgReportCrash(int signal, siginfo *info, ucontext *context, const char *origin) {
         static std::atomic<int> reports{};
         if (reports.fetch_add(1) >= 8)
             return; // Avoid flooding the log if faults repeat
 
         char threadName[17]{};
         prctl(PR_GET_NAME, threadName, 0, 0, 0);
+
+        // Raw line first: no dladdr (linker lock) and no memory reads, so it survives almost anything
+        __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "[%s] signal %d code %d fault 0x%llx tid %d thread '%s' pc 0x%llx lr 0x%llx sp 0x%llx fp 0x%llx",
+                            origin, signal, info->si_code, static_cast<unsigned long long>(context->uc_mcontext.fault_address), gettid(), threadName,
+                            static_cast<unsigned long long>(context->uc_mcontext.pc), static_cast<unsigned long long>(context->uc_mcontext.regs[30]),
+                            static_cast<unsigned long long>(context->uc_mcontext.sp), static_cast<unsigned long long>(context->uc_mcontext.regs[29]));
+
+        // Reads memory without faulting (EFAULT instead of SIGSEGV)
+        auto safeRead{[](const void *address, void *out, size_t size) -> bool {
+            iovec local{out, size}, remote{const_cast<void *>(address), size};
+            return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(size);
+        }};
 
         auto describe{[](void *address, char *out, size_t outSize) {
             Dl_info dl{};
@@ -121,19 +134,21 @@ namespace skyline::signal {
         describe(reinterpret_cast<void *>(context->uc_mcontext.regs[30]), where, sizeof(where));
         __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "  lr %s", where);
 
-        auto frame{reinterpret_cast<StackFrame *>(context->uc_mcontext.regs[29])};
-        for (int depth{}; depth < 32 && frame && frame->lr; depth++) {
-            describe(frame->lr, where, sizeof(where));
+        auto frameAddress{reinterpret_cast<StackFrame *>(context->uc_mcontext.regs[29])};
+        for (int depth{}; depth < 32 && frameAddress; depth++) {
+            StackFrame frame{};
+            if (!safeRead(frameAddress, &frame, sizeof(frame)) || !frame.lr)
+                break;
+            describe(frame.lr, where, sizeof(where));
             __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "  #%02d %s", depth, where);
-            auto next{frame->next};
-            if (next <= frame)
+            if (frame.next <= frameAddress)
                 break; // Stack grows down: a sane chain only moves to higher addresses
-            frame = next;
+            frameAddress = frame.next;
         }
     }
 
     void ExceptionalSignalHandler(int signal, siginfo *info, ucontext *context) {
-        DbgReportCrash(signal, info, context);
+        DbgReportCrash(signal, info, context, "host-exception");
         SignalException signalException;
         signalException.signal = signal;
         signalException.pc = reinterpret_cast<void *>(context->uc_mcontext.pc);
@@ -218,6 +233,22 @@ namespace skyline::signal {
         if (TlsRestorer)
             tls = TlsRestorer();
 
+        // DEBUG: SIGSEGV/SIGBUS are installed with SA_NODEFER, so a fault inside a fault handler (e.g. in a trap callback that syncs a texture)
+        // re-enters here instead of the kernel silently killing the process. Log it, then let the default action terminate the process.
+        static thread_local int dbgFaultDepth{};
+        bool isFault{signum == SIGSEGV || signum == SIGBUS};
+        if (isFault && dbgFaultDepth > 0) {
+            DbgReportCrash(signum, info, context, "nested-fault-in-handler");
+            struct sigaction defaultAction{};
+            defaultAction.sa_handler = SIG_DFL;
+            Sigaction(signum, &defaultAction);
+            if (tls)
+                asm volatile("MSR TPIDR_EL0, %x0"::"r"(tls));
+            return; // The faulting instruction re-executes and the default action terminates the process
+        }
+        if (isFault)
+            dbgFaultDepth++;
+
         // If the TLS was restored, the signal happened in guest code
         if (tls != nullptr) {
             if (auto guestHandler = GuestHandlers[static_cast<size_t>(signum)])
@@ -230,6 +261,9 @@ namespace skyline::signal {
             else
                 LOGWNF("Unhandled host signal {}, PC: 0x{:x}, Fault address: 0x{:x}", signum, context->uc_mcontext.pc, context->uc_mcontext.fault_address);
         }
+
+        if (isFault)
+            dbgFaultDepth--;
 
         if (tls)
             asm volatile("MSR TPIDR_EL0, %x0"::"r"(tls));
@@ -249,11 +283,14 @@ namespace skyline::signal {
         for (int signal : signals) {
             std::call_once(once[static_cast<size_t>(signal)], [&] {
                 struct sigaction oldAction{};
-                Sigaction(signal, &action, &oldAction);
+                struct sigaction signalAction{action};
+                if (signal == SIGSEGV || signal == SIGBUS)
+                    signalAction.sa_flags |= SA_NODEFER; // DEBUG: see GuestSafeSignalHandler (nested fault reporting)
+                Sigaction(signal, &signalAction, &oldAction);
 
                 auto oldFlags = oldAction.sa_flags;
                 if (oldFlags) {
-                    oldFlags &= ~SA_UNSUPPORTED; // Mask out kernel not supporting old sigaction() bits
+                    oldFlags &= ~(SA_UNSUPPORTED | SA_NODEFER); // Mask out kernel not supporting old sigaction() bits
                     oldFlags |= SA_SIGINFO | SA_EXPOSE_TAGBITS | SA_RESTART | SA_ONSTACK; // Intentionally ignore these flags for the comparison
                     if (oldFlags != (action.sa_flags | SA_RESTART))
                         throw exception("Old sigaction flags aren't equivalent to the replaced signal: {:#b} | {:#b}", oldFlags, action.sa_flags);
