@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // Copyright © 2022 Skyline Team and Contributors (https://github.com/skyline-emu/)
 
+#include <bit>
 #include <soc/gm20b/channel.h>
 #include <soc/gm20b/gmmu.h>
 #include <gpu/texture_manager.h>
@@ -359,10 +360,22 @@ namespace skyline::gpu::interconnect {
                     .pitch = static_cast<u32>(textureHeader.tileConfig.pitchHigh) << TextureImageControl::TileConfig::PitchAlignmentBits,
                 };
             } else if (textureHeader.headerType == TextureImageControl::HeaderType::BlockLinear) {
+                // The hardware never uses a block that is taller (or deeper) than the surface itself: the block height/depth from the TIC is only an
+                // upper bound that gets clamped to the size of the surface in GOBs (this is already done for mip levels 1+ in layout.cpp, but level 0
+                // has to follow the same rule, otherwise small BCn atlases with a block height of 16 in their TIC are deswizzled incorrectly)
+                constexpr size_t GobHeightLines{8}; //!< The height of a single GOB in lines
+                const auto ClampBlockGobs{[](size_t blockGobs, size_t surfaceGobs) -> size_t {
+                    return surfaceGobs > blockGobs ? blockGobs : std::bit_ceil(surfaceGobs);
+                }};
+                const size_t formatBlockHeight{std::max<size_t>(guest.format->blockHeight, 1)};
+                const size_t surfaceHeightLines{(static_cast<size_t>(guest.dimensions.height) + formatBlockHeight - 1) / formatBlockHeight};
+                const size_t surfaceHeightGobs{std::max<size_t>((surfaceHeightLines + GobHeightLines - 1) / GobHeightLines, 1)};
+                const size_t surfaceDepthGobs{std::max<size_t>(guest.dimensions.depth, 1)};
+
                 guest.tileConfig = {
                     .mode = texture::TileMode::Block,
-                    .blockHeight = static_cast<u8>(1U << textureHeader.tileConfig.tileHeightGobsLog2),
-                    .blockDepth = static_cast<u8>(1U << textureHeader.tileConfig.tileDepthGobsLog2),
+                    .blockHeight = static_cast<u8>(ClampBlockGobs(1U << textureHeader.tileConfig.tileHeightGobsLog2, surfaceHeightGobs)),
+                    .blockDepth = static_cast<u8>(ClampBlockGobs(1U << textureHeader.tileConfig.tileDepthGobsLog2, surfaceDepthGobs)),
                 };
             } else {
                 throw exception("Unsupported TIC Header Type: {}", static_cast<u32>(textureHeader.headerType));
