@@ -368,6 +368,7 @@ namespace skyline::soc::gm20b {
     }
 
     void ChannelGpfifo::Run() {
+        signal::EnsureLargeSignalStack();
         if (int result{pthread_setname_np(pthread_self(), "GPFIFO")})
             LOGW("Failed to set the thread name: {}", strerror(result));
         AsyncLogger::UpdateTag();

@@ -69,6 +69,12 @@ namespace skyline::signal {
     void DbgReportCrash(int signal, siginfo *info, ucontext *context, const char *origin);
 
     /**
+     * @brief Installs a large (1 MiB) alternate signal stack for the calling thread, if it doesn't have one from us yet
+     * @note Signal handlers run trap callbacks (texture/buffer sync -> Vulkan driver) which need far more than bionic's 16 KiB
+     */
+    void EnsureLargeSignalStack();
+
+    /**
      * @brief Our delegator for sigaction, we need to do this due to sigchain hooking bionic's sigaction and it intercepting signals before they're passed onto userspace
      * This not only leads to performance degradation but also requires host TLS to be in the TLS register which we cannot ensure for in-guest signals
      */

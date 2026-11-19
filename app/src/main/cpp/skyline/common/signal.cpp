@@ -8,6 +8,7 @@
 #include <cxxabi.h>
 #include <sys/prctl.h>
 #include <sys/uio.h>
+#include <sys/mman.h>
 #include <android/log.h>
 #include "signal.h"
 
@@ -147,6 +148,64 @@ namespace skyline::signal {
                 break; // Stack grows down: a sane chain only moves to higher addresses
             frameAddress = frame.next;
         }
+
+        // Heuristic backtrace: code addresses found on the stack (works even with a corrupted frame chain)
+        auto stackAddress{reinterpret_cast<u64 *>(context->uc_mcontext.sp)};
+        int found{};
+        for (int word{}; word < 4096 && found < 24; word++) {
+            u64 value{};
+            if (!safeRead(stackAddress + word, &value, sizeof(value)))
+                break;
+            Dl_info dl{};
+            if (value < 0x10000 || !dladdr(reinterpret_cast<void *>(value), &dl) || !dl.dli_fname)
+                continue;
+            if (!strstr(dl.dli_fname, ".so"))
+                continue;
+            describe(reinterpret_cast<void *>(value), where, sizeof(where));
+            __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "  scan sp+0x%x %s", word * 8, where);
+            found++;
+        }
+    }
+
+    void EnsureLargeSignalStack() {
+        struct AltStack {
+            u8 *mapping{};
+            size_t mappingSize{};
+
+            ~AltStack() {
+                if (mapping) {
+                    stack_t disable{.ss_flags = SS_DISABLE};
+                    sigaltstack(&disable, nullptr);
+                    munmap(mapping, mappingSize);
+                }
+            }
+        };
+        static thread_local AltStack altStack;
+        if (altStack.mapping)
+            return;
+
+        constexpr size_t StackSize{1024 * 1024};
+        constexpr size_t GuardSize{0x4000}; // Below the stack, which grows down
+        void *mapping{mmap(nullptr, StackSize + GuardSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0)};
+        if (mapping == MAP_FAILED) {
+            LOGW("Failed to allocate a signal stack: {}", strerror(errno));
+            return;
+        }
+        mprotect(mapping, GuardSize, PROT_NONE);
+        prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, mapping, StackSize + GuardSize, "strato signal stack");
+
+        stack_t stack{
+            .ss_sp = static_cast<u8 *>(mapping) + GuardSize,
+            .ss_flags = 0,
+            .ss_size = StackSize,
+        };
+        if (sigaltstack(&stack, nullptr)) {
+            LOGW("Failed to install a signal stack: {}", strerror(errno));
+            munmap(mapping, StackSize + GuardSize);
+            return;
+        }
+        altStack.mapping = static_cast<u8 *>(mapping);
+        altStack.mappingSize = StackSize + GuardSize;
     }
 
     void ExceptionalSignalHandler(int signal, siginfo *info, ucontext *context) {
@@ -238,8 +297,16 @@ namespace skyline::signal {
         // DEBUG: SIGSEGV/SIGBUS are installed with SA_NODEFER, so a fault inside a fault handler (e.g. in a trap callback that syncs a texture)
         // re-enters here instead of the kernel silently killing the process. Log it, then let the default action terminate the process.
         static thread_local int dbgFaultDepth{};
+        static thread_local u64 dbgOuterPc{}, dbgOuterFault{}, dbgOuterLr{};
         bool isFault{signum == SIGSEGV || signum == SIGBUS};
         if (isFault && dbgFaultDepth > 0) {
+            Dl_info outerDl{};
+            bool outerKnown{dladdr(reinterpret_cast<void *>(dbgOuterPc), &outerDl) && outerDl.dli_fname};
+            __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "outer fault: pc 0x%llx (%s+0x%llx %s) lr 0x%llx fault 0x%llx",
+                                static_cast<unsigned long long>(dbgOuterPc), outerKnown ? outerDl.dli_fname : "?",
+                                static_cast<unsigned long long>(outerKnown ? dbgOuterPc - reinterpret_cast<u64>(outerDl.dli_fbase) : 0),
+                                outerKnown && outerDl.dli_sname ? outerDl.dli_sname : "",
+                                static_cast<unsigned long long>(dbgOuterLr), static_cast<unsigned long long>(dbgOuterFault));
             DbgReportCrash(signum, info, context, "nested-fault-in-handler");
             struct sigaction defaultAction{};
             defaultAction.sa_handler = SIG_DFL;
@@ -248,8 +315,12 @@ namespace skyline::signal {
                 asm volatile("MSR TPIDR_EL0, %x0"::"r"(tls));
             return; // The faulting instruction re-executes and the default action terminates the process
         }
-        if (isFault)
+        if (isFault) {
+            dbgOuterPc = context->uc_mcontext.pc;
+            dbgOuterLr = context->uc_mcontext.regs[30];
+            dbgOuterFault = context->uc_mcontext.fault_address;
             dbgFaultDepth++;
+        }
 
         // If the TLS was restored, the signal happened in guest code
         if (tls != nullptr) {

@@ -35,6 +35,7 @@ namespace skyline::kernel::type {
     }
 
     void KThread::StartThread() {
+        signal::EnsureLargeSignalStack();
         pthread = pthread_self();
         std::array<char, 16> threadName{};
         if (int result{pthread_getname_np(pthread, threadName.data(), threadName.size())})
