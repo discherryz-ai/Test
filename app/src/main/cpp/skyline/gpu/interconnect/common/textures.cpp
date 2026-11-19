@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // Copyright © 2022 Skyline Team and Contributors (https://github.com/skyline-emu/)
 
+#include <gpu/dbg_toggle.h>
 #include <bit>
 #include <soc/gm20b/channel.h>
 #include <soc/gm20b/gmmu.h>
@@ -266,7 +267,8 @@ namespace skyline::gpu::interconnect {
             std::fill(textureHeaderCache.begin(), textureHeaderCache.end(), CacheEntry{});
         } else if (textureHeaders.size() > index && textureHeaderCache[index].view) {
             auto &cached{textureHeaderCache[index]};
-            if (cached.sequenceNumber == ctx.channelCtx.channelSequenceNumber)
+            // The sequence number doesn't advance on CPU or cross-channel writes to the TIC pool, so the TIC must always be compared
+            if (cached.sequenceNumber == ctx.channelCtx.channelSequenceNumber && ((dbg::Mask() & 0x80000000u) || cached.tic == textureHeaders[index]))
                 return DbgTraceNameRtSample(index, cached.view);
 
             if (cached.tic == textureHeaders[index] && !cached.view->texture->replaced) {
