@@ -94,6 +94,7 @@ namespace skyline::gpu {
 
             if (!buffer->AllCpuBackingWritesBlocked() && buffer->dirtyState != DirtyState::GpuDirty) {
                 buffer->dirtyState = DirtyState::CpuDirty;
+                buffer->dirtyAll = true;
                 return true;
             }
 
@@ -102,6 +103,7 @@ namespace skyline::gpu {
                 // While the read data may be invalid it's still better than nothing and works in most cases
                 memcpy(buffer->mirror.data(), buffer->backing->data(), buffer->mirror.size());
                 buffer->dirtyState = *buffer->gpu.state.settings->enableFastReadbackWrites ? DirtyState::CpuDirty : DirtyState::Clean;
+                buffer->dirtyAll = true;
                 return true;
             }
 
@@ -114,9 +116,39 @@ namespace skyline::gpu {
 
             buffer->SynchronizeGuest(true); // We need to assume the buffer is dirty since we don't know what the guest is writing
             buffer->dirtyState = DirtyState::CpuDirty;
+            buffer->dirtyAll = true;
 
             return true;
         });
+
+        // Large buffers: track CPU writes per page so only the dirty pages need to be synchronised
+        constexpr size_t PageTrackingMinSize{4 * 1024 * 1024};
+        if (guest->size() >= PageTrackingMinSize) {
+            pageTracking = true;
+            dirtyPages.assign(((guest->size() + constant::PageSize - 1) / constant::PageSize + 63) / 64, 0);
+            gpu.state.process->trap.SetPageWriteCallback(*trapHandle, [weakThis](u8 *page) -> bool {
+                if (dbg::Mask() & 0x10000u)
+                    return false; // A/B: old whole-buffer behaviour
+                auto buffer{weakThis.lock()};
+                if (!buffer)
+                    return false;
+                std::unique_lock stateLock{buffer->stateMutex, std::try_to_lock};
+                if (!stateLock)
+                    return false;
+                if (!buffer->guest || buffer->AllCpuBackingWritesBlocked() || buffer->dirtyState == DirtyState::GpuDirty)
+                    return false; // Needs the regular path
+                i64 begin{page - buffer->guest->data()}, end{begin + static_cast<i64>(constant::PageSize)};
+                begin = std::max<i64>(begin, 0);
+                end = std::min<i64>(end, static_cast<i64>(buffer->guest->size()));
+                if (begin >= end)
+                    return false;
+                if (buffer->dirtyState == DirtyState::Clean)
+                    buffer->dirtyAll = false;
+                buffer->MarkMirrorDirty(static_cast<size_t>(begin), static_cast<size_t>(end - begin));
+                buffer->dirtyState = DirtyState::CpuDirty;
+                return true;
+            });
+        }
     }
 
     void Buffer::EnableTrackedShadowDirect() {
@@ -229,6 +261,8 @@ namespace skyline::gpu {
 
         if (dirtyState != DirtyState::GpuDirty && src->dirtyState != DirtyState::GpuDirty) {
             std::memcpy(mirror.data() + dstOffset, src->mirror.data() + srcOffset, size);
+            if (dirtyState == DirtyState::CpuDirty)
+                MarkMirrorDirty(dstOffset, size);
 
             if (dirtyState == DirtyState::CpuDirty && !SequencedCpuBackingWritesBlocked())
                 // Skip updating backing if the changes are gonna be updated later by SynchroniseHost in executor anyway
@@ -293,6 +327,8 @@ namespace skyline::gpu {
             SynchronizeHost();
 
         std::memcpy(mirror.data() + offset, data.data(), data.size()); // Always copy to mirror since any CPU side reads will need the up-to-date contents
+        if (dirtyState == DirtyState::CpuDirty)
+            MarkMirrorDirty(offset, data.size());
 
         if (dirtyState == DirtyState::CpuDirty && !SequencedCpuBackingWritesBlocked())
             // Skip updating backing if the changes are gonna be updated later by SynchroniseHost in executor anyway
@@ -413,6 +449,106 @@ namespace skyline::gpu {
         MarkGpuDirtyImpl();
     }
 
+    /**
+     * @brief DEBUG: counts buffer syncs, kind 0 = staged (GPU copy), 1 = partial memcpy, 2 = full memcpy of a page-tracked buffer
+     */
+    static void DbgNoteBufferSync(int kind, size_t bytes) {
+        static std::atomic<u64> counts[3]{}, sizes[3]{};
+        counts[kind].fetch_add(1, std::memory_order_relaxed);
+        sizes[kind].fetch_add(bytes, std::memory_order_relaxed);
+        static std::atomic<u32> total{};
+        if ((total.fetch_add(1) & 511) == 511) {
+            u64 c[3], s[3];
+            for (int i{}; i < 3; i++) {
+                c[i] = counts[i].exchange(0);
+                s[i] = sizes[i].exchange(0);
+            }
+            LOGW("DBG bufsync staged={} partial={} full={} stagedKB/avg={} partialKB/avg={} fullKB/avg={}", c[0], c[1], c[2],
+                 c[0] ? s[0] / c[0] / 1024 : 0, c[1] ? s[1] / c[1] / 1024 : 0, c[2] ? s[2] / c[2] / 1024 : 0);
+        }
+    }
+
+    void Buffer::MarkMirrorDirty(size_t offset, size_t size) {
+        if (!pageTracking || !size)
+            return;
+        size_t first{offset / constant::PageSize}, last{(offset + size - 1) / constant::PageSize};
+        for (size_t page{first}; page <= last; page++) {
+            size_t word{page / 64};
+            if (word < dirtyPages.size())
+                dirtyPages[word] |= 1ULL << (page % 64);
+        }
+    }
+
+    std::vector<std::pair<size_t, size_t>> Buffer::TakeDirtyRuns() {
+        std::vector<std::pair<size_t, size_t>> runs;
+        size_t limit{mirror.size()};
+        size_t runStart{}, runEnd{};
+        bool inRun{};
+        for (size_t word{}; word < dirtyPages.size(); word++) {
+            u64 bits{dirtyPages[word]};
+            if (!bits) {
+                if (inRun) {
+                    runs.emplace_back(runStart, std::min(runEnd, limit) - runStart);
+                    inRun = false;
+                }
+                continue;
+            }
+            dirtyPages[word] = 0;
+            for (size_t bit{}; bit < 64; bit++) {
+                size_t pageOffset{(word * 64 + bit) * constant::PageSize};
+                if (bits & (1ULL << bit)) {
+                    if (!inRun) {
+                        runStart = pageOffset;
+                        inRun = true;
+                    }
+                    runEnd = pageOffset + constant::PageSize;
+                } else if (inRun) {
+                    runs.emplace_back(runStart, std::min(runEnd, limit) - runStart);
+                    inRun = false;
+                }
+            }
+        }
+        if (inRun && runStart < limit)
+            runs.emplace_back(runStart, std::min(runEnd, limit) - runStart);
+        return runs;
+    }
+
+    bool Buffer::SynchronizeHostStaged(const vk::raii::CommandBuffer &commandBuffer, const std::shared_ptr<FenceCycle> &cycle) {
+        if (!guest || isDirect || !pageTracking || (dbg::Mask() & 0x10000u))
+            return false;
+
+        std::scoped_lock lock{stateMutex};
+        if (dirtyState != DirtyState::CpuDirty || dirtyAll)
+            return false;
+        if (PollFence())
+            return false; // The GPU is done with the buffer, a direct partial memcpy is cheaper
+
+        dirtyState = DirtyState::Clean;
+        AdvanceSequence(); // We are modifying GPU backing contents so advance to the next sequence
+        gpu.state.process->trap.TrapRegions(*trapHandle, true); // Before snapshotting the dirty pages so that writes from now on are tracked for the next sync
+        auto runs{TakeDirtyRuns()};
+        dirtyAll = false;
+        if (runs.empty())
+            return true;
+
+        size_t total{};
+        for (auto &run : runs)
+            total += run.second;
+        auto stagingBuffer{gpu.memory.AllocateStagingBuffer(total)};
+        std::vector<vk::BufferCopy> copies;
+        copies.reserve(runs.size());
+        size_t stagingOffset{};
+        for (auto [offset, size] : runs) {
+            std::memcpy(stagingBuffer->data() + stagingOffset, mirror.data() + offset, size);
+            copies.push_back(vk::BufferCopy{.srcOffset = stagingOffset, .dstOffset = offset, .size = size});
+            stagingOffset += size;
+        }
+        commandBuffer.copyBuffer(stagingBuffer->vkBuffer, backing->vkBuffer, copies);
+        cycle->AttachObject(stagingBuffer);
+        DbgNoteBufferSync(0, total);
+        return true;
+    }
+
     __attribute__((noinline)) void Buffer::WaitOnFence() {
         TRACE_EVENT("gpu", "Buffer::WaitOnFence");
 
@@ -468,6 +604,8 @@ namespace skyline::gpu {
     void Buffer::SynchronizeHost(bool skipTrap) {
         if (!guest || isDirect)
             return;
+        std::vector<std::pair<size_t, size_t>> partialRuns;
+        bool partial{};
 
         TRACE_EVENT("gpu", "Buffer::SynchronizeHost");
 
@@ -483,9 +621,28 @@ namespace skyline::gpu {
 
             if (!skipTrap)
                 gpu.state.process->trap.TrapRegions(*trapHandle, true); // Trap any future CPU writes to this buffer, must be done before the memcpy so that any modifications during the copy are tracked
+
+            if (pageTracking && !dirtyAll && !(dbg::Mask() & 0x10000u)) {
+                partialRuns = TakeDirtyRuns(); // After re-trapping, so writes from now on land in the next dirty set
+                partial = true;
+            } else if (pageTracking) {
+                TakeDirtyRuns();
+            }
+            dirtyAll = false;
         }
 
-        std::memcpy(backing->data(), mirror.data(), mirror.size());
+        if (partial) {
+            size_t bytes{};
+            for (auto [offset, size] : partialRuns) {
+                std::memcpy(backing->data() + offset, mirror.data() + offset, size);
+                bytes += size;
+            }
+            DbgNoteBufferSync(1, bytes);
+        } else {
+            std::memcpy(backing->data(), mirror.data(), mirror.size());
+            if (pageTracking)
+                DbgNoteBufferSync(2, mirror.size());
+        }
     }
 
     bool Buffer::SynchronizeGuest(bool skipTrap, bool nonBlocking) {
@@ -507,6 +664,9 @@ namespace skyline::gpu {
             std::memcpy(mirror.data(), backing->data(), mirror.size());
 
             dirtyState = DirtyState::Clean;
+            dirtyAll = false;
+            if (pageTracking)
+                TakeDirtyRuns();
         }
 
         if (!skipTrap)

@@ -25,6 +25,11 @@ namespace skyline {
         ReprotectIntervals(handle->intervals, protection);
     }
 
+    void TrapManager::SetPageWriteCallback(TrapHandle handle, PageWriteCallback callback) {
+        std::scoped_lock lock{trapMutex};
+        handle->value.pageWriteCallback = std::move(callback);
+    }
+
     void TrapManager::RemoveTrap(TrapHandle handle) {
         TRACE_EVENT("host", "TrapManager::RemoveTrap");
         std::scoped_lock lock{trapMutex};
@@ -127,6 +132,35 @@ namespace skyline {
 
             // Do callbacks for every entry in the intervals
             if (write) {
+                // Page-granular path: only if every protected entry supports it and accepts this page
+                bool pageMode{true}, anyProtected{};
+                for (auto entryRef : entries) {
+                    auto &entry{entryRef.get()};
+                    if (entry.protection == TrapProtection::None)
+                        continue;
+                    anyProtected = true;
+                    if (!entry.pageWriteCallback) {
+                        pageMode = false;
+                        break;
+                    }
+                }
+                if (pageMode && anyProtected) {
+                    u8 *page{reinterpret_cast<u8 *>(reinterpret_cast<uintptr_t>(address) & ~static_cast<uintptr_t>(constant::PageSize - 1))};
+                    bool handled{true};
+                    for (auto entryRef : entries) {
+                        auto &entry{entryRef.get()};
+                        if (entry.protection != TrapProtection::None && !entry.pageWriteCallback(page)) {
+                            handled = false;
+                            break;
+                        }
+                    }
+                    if (handled) {
+                        mprotect(page, constant::PageSize, PROT_READ | PROT_WRITE | PROT_EXEC);
+                        return true;
+                    }
+                    // Otherwise fall through to the regular whole-entry path (it marks the entries fully dirty)
+                }
+
                 for (auto entryRef : entries) {
                     auto &entry{entryRef.get()};
                     if (entry.protection == TrapProtection::None)

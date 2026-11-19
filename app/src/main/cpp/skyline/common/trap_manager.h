@@ -18,12 +18,14 @@ namespace skyline {
     };
 
     using TrapCallback = std::function<bool()>;
+    using PageWriteCallback = std::function<bool(u8 *page)>; //!< Returns true if the write to this page was fully handled (only this page gets unprotected)
     using LockCallback = std::function<void()>;
 
     struct CallbackEntry {
         TrapProtection protection; //!< The least restrictive protection that this callback needs to have
         LockCallback lockCallback;
         TrapCallback readCallback, writeCallback;
+        PageWriteCallback pageWriteCallback; //!< Optional: page-granular write handling, see TrapManager::SetPageWriteCallback
 
         CallbackEntry(TrapProtection protection, LockCallback lockCallback, TrapCallback readCallback, TrapCallback writeCallback);
     };
@@ -57,6 +59,11 @@ namespace skyline {
          * @param writeOnly If the trap is optimally for write-only accesses, this is not guarenteed
          */
         void TrapRegions(TrapHandle handle, bool writeOnly);
+
+        /**
+         * @brief Enables page-granular write handling: on a write fault, if all protected entries on the page accept it through their page callback, only that page is unprotected
+         */
+        void SetPageWriteCallback(TrapHandle handle, PageWriteCallback callback);
 
         /**
          * @brief Removes protections from a region of memory

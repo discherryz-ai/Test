@@ -57,6 +57,9 @@ namespace skyline::gpu {
         bool directTrackedShadowActive{}; //!< (Direct) If `directTrackedShadow` is currently being used to track writes
 
         span<u8> mirror{}; //!< A contiguous mirror of all the guest mappings to allow linear access on the CPU
+        bool pageTracking{}; //!< (Staged, large buffers) CPU writes are tracked per page so only dirty pages are synchronised
+        bool dirtyAll{true}; //!< If the CpuDirty contents aren't described by dirtyPages (a full copy is needed)
+        std::vector<u64> dirtyPages; //!< Bitmap of CPU-dirty pages (buffer-relative, constant::PageSize granularity)
         std::optional<memory::Buffer> backing;
         std::optional<memory::ImportedBuffer> directBacking;
 
@@ -345,6 +348,25 @@ namespace skyline::gpu {
          * @note The buffer **must** be locked prior to calling this
          */
         void SynchronizeHost(bool skipTrap = false);
+
+        /**
+         * @brief If the buffer is CPU dirty with a known set of dirty pages and still in use by the GPU, upload the dirty pages through a staging buffer recorded into the supplied command buffer instead of waiting
+         * @return If the buffer was synchronised, otherwise SynchronizeHost must be used
+         * @note The command buffer must not yet contain commands that use this buffer, and a barrier against prior work must precede the copy
+         */
+        bool SynchronizeHostStaged(const vk::raii::CommandBuffer &commandBuffer, const std::shared_ptr<FenceCycle> &cycle);
+
+        /**
+         * @brief Marks a range of the mirror as CPU dirty for page-granular synchronisation
+         * @note stateMutex must be locked
+         */
+        void MarkMirrorDirty(size_t offset, size_t size);
+
+        /**
+         * @brief Returns the dirty page ranges as (offset, size) byte runs and clears the bitmap
+         * @note stateMutex must be locked
+         */
+        std::vector<std::pair<size_t, size_t>> TakeDirtyRuns();
 
         /**
          * @brief Synchronizes the guest buffer with the host buffer

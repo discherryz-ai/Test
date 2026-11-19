@@ -844,14 +844,21 @@ namespace skyline::gpu::interconnect {
             RecordFullBarrier(slot->commandBuffer);
         }
 
+        bool stagedBufferUploads{};
         for (const auto &attachedBuffer : ranges::views::concat(attachedBuffers, preserveAttachedBuffers)) {
             if (attachedBuffer->RequiresCycleAttach()) {
-                attachedBuffer->SynchronizeHost(); // Synchronize attached buffers from the CPU without using a staging buffer
+                // Large page-tracked buffers still in use by the GPU: upload the dirty pages on the GPU timeline (start of this command buffer) instead of waiting
+                if (attachedBuffer->SynchronizeHostStaged(slot->commandBuffer, cycle))
+                    stagedBufferUploads = true;
+                else
+                    attachedBuffer->SynchronizeHost(); // Synchronize attached buffers from the CPU without using a staging buffer
                 cycle->AttachObject(attachedBuffer.buffer);
                 attachedBuffer->UpdateCycle(cycle);
                 attachedBuffer->AllowAllBackingWrites();
             }
         }
+        if (stagedBufferUploads)
+            RecordFullBarrier(slot->commandBuffer); // The uploads must complete before any command of this command buffer reads the buffers
 
         RotateRecordSlot();
     }
