@@ -311,6 +311,38 @@ namespace skyline::gpu {
         for (auto &texture : matches)
             texture->SynchronizeGuest(false, true);
 
+        {
+            // Textures that only partially overlap the new one were skipped by the search above; if they hold GPU-written data
+            // that never reached guest memory, the new texture would be created from stale guest memory, so write them back first
+            const bool dbgTrace{(guestTexture.dimensions.width == 840 && (guestTexture.dimensions.height == 156 || guestTexture.dimensions.height == 96)) ||
+                                (guestTexture.dimensions.width == 848 && guestTexture.dimensions.height == 252)};
+            const bool flush{!(dbg::Mask() & 0x80000000u)};
+            boost::container::small_vector<std::shared_ptr<Texture>, 8> partial;
+            auto overlapIt{std::lower_bound(textures.begin(), textures.end(), guestMapping, [](const auto &element, const auto &value) {
+                return element.end() <= value.begin();
+            })};
+            for (; overlapIt != textures.end(); ++overlapIt) {
+                if (overlapIt->begin() >= guestMapping.end() || overlapIt->texture->replaced)
+                    continue;
+                if (overlapIt->contains(guestMapping))
+                    continue; // Already considered by the search above
+                auto &candidate{overlapIt->texture};
+                if (std::find(partial.begin(), partial.end(), candidate) != partial.end() || std::find(matches.begin(), matches.end(), candidate) != matches.end())
+                    continue;
+                partial.push_back(candidate);
+                if (dbgTrace)
+                    LOGW("DBG NAMESRC req={}x{} at 0x{:x} overlaps [{:+#x}, {:+#x}) {} flush={}", static_cast<u32>(guestTexture.dimensions.width), static_cast<u32>(guestTexture.dimensions.height),
+                         static_cast<u64>(reinterpret_cast<uintptr_t>(guestMapping.data())),
+                         static_cast<i64>(overlapIt->begin() - guestMapping.begin()), static_cast<i64>(overlapIt->end() - guestMapping.begin()),
+                         candidate->DbgDescribe(), static_cast<int>(flush));
+            }
+            if (flush)
+                for (auto &texture : partial) {
+                    ContextLock partialLock{tag, *texture};
+                    texture->SynchronizeGuest(false, false);
+                }
+        }
+
         // Create a texture as we cannot find one that matches
         auto texture{std::make_shared<Texture>(gpu, guestTexture)};
         texture->SetupGuestMappings();
