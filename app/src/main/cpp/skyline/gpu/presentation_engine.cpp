@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // Copyright © 2020 Skyline Team and Contributors (https://github.com/skyline-emu/)
 
+#include <gpu/dbg_toggle.h>
 #include <android/native_window_jni.h>
 #include <common/settings.h>
 #include <common/signal.h>
@@ -91,6 +92,7 @@ namespace skyline::gpu {
             static u32 dbgPresentCount{};
             static i64 dbgLastUs{};
             i64 nowUs{std::chrono::duration_cast<std::chrono::microseconds>(GuestFrameClock::Clock::now().time_since_epoch()).count()};
+            dbg::GpuMeterPresent();
             if (dbgPresentCount < 1500) {
                 dbgPresentCount++;
                 LOGW("DBG present #{} tex=0x{:x} dtUs={} swapInterval={}", dbgPresentCount, static_cast<u64>(reinterpret_cast<uintptr_t>(texture.get())), nowUs - dbgLastUs, static_cast<i64>(frame.swapInterval));

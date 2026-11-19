@@ -20,6 +20,45 @@
 
 namespace skyline::dbg {
     /**
+     * @brief DEBUG: GPU busy meter, see gpumeter_patch.py
+     */
+    struct GpuMeterState {
+        std::atomic<u64> busyNs{}, cmdbufs{}, presents{}, windowStartNs{};
+    };
+
+    inline GpuMeterState &GpuMeter() {
+        static GpuMeterState state;
+        return state;
+    }
+
+    inline void GpuMeterReport() {
+        auto &meter{GpuMeter()};
+        u64 now{static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())};
+        u64 start{meter.windowStartNs.load(std::memory_order_relaxed)};
+        if (!start) {
+            meter.windowStartNs.compare_exchange_strong(start, now);
+            return;
+        }
+        if (now - start < 1000000000ULL || !meter.windowStartNs.compare_exchange_strong(start, now))
+            return;
+        u64 busy{meter.busyNs.exchange(0)}, cmdbufs{meter.cmdbufs.exchange(0)}, presents{meter.presents.exchange(0)};
+        double window{static_cast<double>(now - start) / 1e9};
+        LOGW("DBG gpumeter busy={:.0f}% gpu_ms={:.1f} cmdbufs={} presents={} window={:.2f}s",
+             100.0 * static_cast<double>(busy) / static_cast<double>(now - start), static_cast<double>(busy) / 1e6, cmdbufs, presents, window);
+    }
+
+    inline void GpuMeterAddBusy(u64 ns) {
+        GpuMeter().busyNs.fetch_add(ns, std::memory_order_relaxed);
+        GpuMeter().cmdbufs.fetch_add(1, std::memory_order_relaxed);
+        GpuMeterReport();
+    }
+
+    inline void GpuMeterPresent() {
+        GpuMeter().presents.fetch_add(1, std::memory_order_relaxed);
+        GpuMeterReport();
+    }
+
+    /**
      * @brief Путь к файлу-запасному источнику маски: <внешняя папка приложения>/files/dbg_mask
      */
     inline std::string MaskFilePath() {

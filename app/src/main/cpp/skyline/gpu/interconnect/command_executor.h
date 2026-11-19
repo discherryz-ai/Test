@@ -54,6 +54,10 @@ namespace skyline::gpu::interconnect {
             bool capture{}; //!< If this slot's Vulkan commands should be captured using the renderdoc API
             bool didWait{}; //!< If a wait of time longer than GrowThresholdNs occured when this slot was acquired
             std::vector<std::function<void()>> dbgWaitBeforeSubmit; //!< DBG: waits for other executors' submissions that the record thread must finish before submitting this slot
+            std::optional<vk::raii::QueryPool> dbgTimestampPool; //!< DBG: GPU busy meter, timestamps at the start (0) and end (1) of the command buffer
+            bool dbgTimestampsWritten{};
+            u64 dbgTimestampMask{};
+            double dbgTimestampPeriodNs{};
 
             Slot(GPU &gpu);
 

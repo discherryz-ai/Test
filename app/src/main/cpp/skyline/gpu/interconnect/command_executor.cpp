@@ -90,6 +90,16 @@ namespace skyline::gpu::interconnect {
           cycle{std::make_shared<FenceCycle>(gpu.vkDevice, *fence, *semaphore, true)},
           nodes{allocator},
           pendingPostRenderPassNodes{allocator} {
+        {
+            auto limits{gpu.vkPhysicalDevice.getProperties().limits};
+            auto families{gpu.vkPhysicalDevice.getQueueFamilyProperties()};
+            u32 validBits{gpu.vkQueueFamilyIndex < families.size() ? families[gpu.vkQueueFamilyIndex].timestampValidBits : 0};
+            if (validBits && limits.timestampPeriod > 0.0f) {
+                dbgTimestampPool.emplace(gpu.vkDevice, vk::QueryPoolCreateInfo{.queryType = vk::QueryType::eTimestamp, .queryCount = 2});
+                dbgTimestampMask = validBits >= 64 ? ~0ULL : ((1ULL << validBits) - 1);
+                dbgTimestampPeriodNs = limits.timestampPeriod;
+            }
+        }
         Begin();
     }
 
@@ -102,12 +112,24 @@ namespace skyline::gpu::interconnect {
           allocator{std::move(other.allocator)},
           nodes{std::move(other.nodes)},
           pendingPostRenderPassNodes{std::move(other.pendingPostRenderPassNodes)},
-          ready{other.ready} {}
+          ready{other.ready},
+          dbgTimestampPool{std::move(other.dbgTimestampPool)},
+          dbgTimestampsWritten{other.dbgTimestampsWritten},
+          dbgTimestampMask{other.dbgTimestampMask},
+          dbgTimestampPeriodNs{other.dbgTimestampPeriodNs} {}
 
     std::shared_ptr<FenceCycle> CommandRecordThread::Slot::Reset(GPU &gpu) {
         auto startTime{util::GetTimeNs()};
 
         cycle->Wait();
+        if (dbgTimestampsWritten && dbgTimestampPool) {
+            dbgTimestampsWritten = false;
+            auto [result, stamps]{dbgTimestampPool->getResults<u64>(0, 2, sizeof(u64) * 2, sizeof(u64), vk::QueryResultFlagBits::e64)};
+            if (result == vk::Result::eSuccess && stamps.size() == 2) {
+                u64 ticks{(stamps[1] - stamps[0]) & dbgTimestampMask};
+                dbg::GpuMeterAddBusy(static_cast<u64>(static_cast<double>(ticks) * dbgTimestampPeriodNs));
+            }
+        }
         cycle = std::make_shared<FenceCycle>(*cycle);
         if (util::GetTimeNs() - startTime > GrowThresholdNs)
             didWait = true;
@@ -127,6 +149,10 @@ namespace skyline::gpu::interconnect {
         commandBuffer.begin(vk::CommandBufferBeginInfo{
             .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
         });
+        if (dbgTimestampPool) {
+            commandBuffer.resetQueryPool(**dbgTimestampPool, 0, 2);
+            commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, **dbgTimestampPool, 0);
+        }
         ready = true;
         beginCondition.notify_all();
     }
@@ -221,6 +247,10 @@ namespace skyline::gpu::interconnect {
 
         if (gpu.nierDiagnosticsEnabled)
             currentNodeType = static_cast<size_t>(-1);
+        if (slot->dbgTimestampPool) {
+            slot->commandBuffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, **slot->dbgTimestampPool, 1);
+            slot->dbgTimestampsWritten = true;
+        }
         slot->commandBuffer.end();
         slot->ready = false;
 
