@@ -6,6 +6,8 @@
 #include <unwind.h>
 #include <fcntl.h>
 #include <cxxabi.h>
+#include <sys/prctl.h>
+#include <android/log.h>
 #include "signal.h"
 
 namespace skyline::signal {
@@ -82,7 +84,56 @@ namespace skyline::signal {
         }
     }
 
+    /**
+     * @brief DEBUG: Writes the fault location and a frame-pointer backtrace (library + offset) to logcat
+     * @note Uses only dladdr and __android_log_print so it works even when the fault is inside a driver thread
+     */
+    static void DbgReportCrash(int signal, siginfo *info, ucontext *context) {
+        static std::atomic<int> reports{};
+        if (reports.fetch_add(1) >= 8)
+            return; // Avoid flooding the log if faults repeat
+
+        char threadName[17]{};
+        prctl(PR_GET_NAME, threadName, 0, 0, 0);
+
+        auto describe{[](void *address, char *out, size_t outSize) {
+            Dl_info dl{};
+            if (address && dladdr(address, &dl) && dl.dli_fname) {
+                const char *name{strrchr(dl.dli_fname, '/')};
+                name = name ? name + 1 : dl.dli_fname;
+                auto offset{reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(dl.dli_fbase)};
+                if (dl.dli_sname)
+                    snprintf(out, outSize, "%s+0x%zx (%s+0x%zx)", name, static_cast<size_t>(offset), dl.dli_sname,
+                             static_cast<size_t>(reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(dl.dli_saddr)));
+                else
+                    snprintf(out, outSize, "%s+0x%zx", name, static_cast<size_t>(offset));
+            } else {
+                snprintf(out, outSize, "%p (?)", address);
+            }
+        }};
+
+        char where[256];
+        auto pc{reinterpret_cast<void *>(context->uc_mcontext.pc)};
+        describe(pc, where, sizeof(where));
+        __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "signal %d code %d fault 0x%llx tid %d thread '%s' pc %s",
+                            signal, info->si_code, static_cast<unsigned long long>(context->uc_mcontext.fault_address), gettid(), threadName, where);
+
+        describe(reinterpret_cast<void *>(context->uc_mcontext.regs[30]), where, sizeof(where));
+        __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "  lr %s", where);
+
+        auto frame{reinterpret_cast<StackFrame *>(context->uc_mcontext.regs[29])};
+        for (int depth{}; depth < 32 && frame && frame->lr; depth++) {
+            describe(frame->lr, where, sizeof(where));
+            __android_log_print(ANDROID_LOG_FATAL, "StratoCrash", "  #%02d %s", depth, where);
+            auto next{frame->next};
+            if (next <= frame)
+                break; // Stack grows down: a sane chain only moves to higher addresses
+            frame = next;
+        }
+    }
+
     void ExceptionalSignalHandler(int signal, siginfo *info, ucontext *context) {
+        DbgReportCrash(signal, info, context);
         SignalException signalException;
         signalException.signal = signal;
         signalException.pc = reinterpret_cast<void *>(context->uc_mcontext.pc);
