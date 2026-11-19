@@ -282,6 +282,12 @@ namespace skyline::gpu {
                 }
             }
         }
+        if (guestTexture.dimensions.width == 848 && guestTexture.dimensions.height == 252)
+            LOGW("DBG NAMERT find addr=0x{:x} size={} req={}x{} -> {} aliases={} {}", static_cast<u64>(reinterpret_cast<uintptr_t>(guestMapping.data())), guestMapping.size(),
+                 static_cast<u32>(guestTexture.dimensions.width), static_cast<u32>(guestTexture.dimensions.height),
+                 layerMipMatch ? "layerMipMatch" : (fullMatch ? "fullMatch" : "create"), matches.size(),
+                 layerMipMatch ? layerMipMatch->DbgDescribe() : (fullMatch ? fullMatch->DbgDescribe() : std::string{}));
+
         if (layerMipMatch) {
             ContextLock textureLock{tag, *layerMipMatch};
             return layerMipMatch->GetView(guestTexture.viewType, vk::ImageSubresourceRange{
@@ -311,6 +317,8 @@ namespace skyline::gpu {
         texture->TransitionLayout(vk::ImageLayout::eGeneral);
         auto it{texture->guest->mappings.begin()};
         textures.emplace(mappingEnd, TextureMapping{texture, it, guestMapping});
+        if (guestTexture.dimensions.width == 848 && guestTexture.dimensions.height == 252)
+            LOGW("DBG NAMERT created {}", texture->DbgDescribe());
         while ((++it) != texture->guest->mappings.end()) {
             guestMapping = *it;
             auto mapping{std::upper_bound(textures.begin(), textures.end(), guestMapping)};

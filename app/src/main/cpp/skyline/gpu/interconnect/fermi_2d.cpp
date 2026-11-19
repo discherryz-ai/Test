@@ -146,6 +146,12 @@ namespace skyline::gpu::interconnect {
         executor.AttachTexture(dstTextureView.get());
         dstTextureView->texture->MarkGpuDirty(executor.usageTracker);
 
+        if (dstGuestTexture.dimensions.width == 848 && dstGuestTexture.dimensions.height == 252)
+            LOGW("DBG NAMEBLIT dst[{}] src[{}] srcDims={}x{} dstRect={}x{}@{},{} srcRect=({},{}) duDx={} dvDy={}",
+                 dstTextureView->texture->DbgDescribe(), srcTextureView->texture->DbgDescribe(),
+                 static_cast<u32>(srcGuestTexture.dimensions.width), static_cast<u32>(srcGuestTexture.dimensions.height),
+                 dstRectWidth, dstRectHeight, dstRectX, dstRectY, centredSrcRectX, centredSrcRectY, duDx, dvDy);
+
         executor.AddCheckpoint("Before blit");
         gpu.helperShaders.blitHelperShader.Blit(
             gpu,

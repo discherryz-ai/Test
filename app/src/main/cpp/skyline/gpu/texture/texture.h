@@ -499,6 +499,11 @@ namespace skyline::gpu {
         bool replaced{};
 
         /**
+         * @brief DEBUG: A short description of the texture (address, size, dirty state, ...) for the trace logs
+         */
+        std::string DbgDescribe() const;
+
+        /**
          * @brief Creates a texture object wrapping the supplied backing with the supplied attributes
          * @param layout The initial layout of the texture, it **must** be eUndefined or ePreinitialized
          */

@@ -5,6 +5,8 @@
 #include <soc/gm20b/channel.h>
 #include <soc/gm20b/gmmu.h>
 #include <gpu/texture_manager.h>
+#include <mutex>
+#include <unordered_map>
 #include <gpu/texture/format.h>
 #include "textures.h"
 
@@ -208,7 +210,7 @@ namespace skyline::gpu::interconnect {
         constexpr vk::ImageLayout NullImageInitialLayout{vk::ImageLayout::eUndefined};
         constexpr vk::ImageTiling NullImageTiling{vk::ImageTiling::eOptimal};
         constexpr vk::ImageCreateFlags NullImageFlags{};
-        constexpr vk::ImageUsageFlags NullImageUsage{vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst};
+        constexpr vk::ImageUsageFlags NullImageUsage{vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled};
 
         auto vkImage{ctx.gpu.memory.AllocateImage(
             {
@@ -230,25 +232,31 @@ namespace skyline::gpu::interconnect {
 
         auto nullTexture{std::make_shared<Texture>(ctx.gpu, std::move(vkImage), NullImageDimensions, NullImageFormat, NullImageInitialLayout, NullImageTiling, NullImageFlags, NullImageUsage)};
         nullTexture->TransitionLayout(vk::ImageLayout::eGeneral);
-
-        // DBG: the null texture used to be left uninitialised, fill it with bright magenta so that every use of it is clearly visible
-        {
-            auto clearCycle{ctx.gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
-                commandBuffer.clearColorImage(nullTexture->GetBacking(), vk::ImageLayout::eGeneral, vk::ClearColorValue{std::array<float, 4>{1.0f, 0.0f, 1.0f, 1.0f}}, vk::ImageSubresourceRange{
-                    .aspectMask = vk::ImageAspectFlagBits::eColor,
-                    .levelCount = 1,
-                    .layerCount = 1,
-                });
-            })};
-            clearCycle->AttachObject(nullTexture);
-            clearCycle->Wait();
-        }
-
         return nullTexture->GetView(vk::ImageViewType::e2D, vk::ImageSubresourceRange{
             .aspectMask = vk::ImageAspectFlagBits::eColor,
             .levelCount = 1,
             .layerCount = 1,
         });;
+    }
+
+    /**
+     * @brief DEBUG: Logs (once per change) which texture object is sampled through a descriptor index if it is a 848x252 name plate texture
+     */
+    static TextureView *DbgTraceNameRtSample(u32 index, TextureView *view) {
+        if (view && view->texture) {
+            auto *texture{view->texture.get()};
+            if (texture->dimensions.width == 848 && texture->dimensions.height == 252) {
+                static std::mutex mutex;
+                static std::unordered_map<u32, const void *> last;
+                std::scoped_lock lock{mutex};
+                auto &entry{last[index]};
+                if (entry != texture) {
+                    entry = texture;
+                    LOGW("DBG NAMERT sample index={} {}", index, texture->DbgDescribe());
+                }
+            }
+        }
+        return view;
     }
 
     TextureView *Textures::GetTexture(InterconnectContext &ctx, u32 index, Shader::TextureType shaderType) {
@@ -259,11 +267,11 @@ namespace skyline::gpu::interconnect {
         } else if (textureHeaders.size() > index && textureHeaderCache[index].view) {
             auto &cached{textureHeaderCache[index]};
             if (cached.sequenceNumber == ctx.channelCtx.channelSequenceNumber)
-                return cached.view;
+                return DbgTraceNameRtSample(index, cached.view);
 
             if (cached.tic == textureHeaders[index] && !cached.view->texture->replaced) {
                 cached.sequenceNumber = ctx.channelCtx.channelSequenceNumber;
-                return cached.view;
+                return DbgTraceNameRtSample(index, cached.view);
             }
         }
 
@@ -394,7 +402,7 @@ namespace skyline::gpu::interconnect {
         }
 
         textureHeaderCache[index] = {textureHeader, texture.get(), ctx.channelCtx.channelSequenceNumber};
-        return texture.get();
+        return DbgTraceNameRtSample(index, texture.get());
     }
 
 

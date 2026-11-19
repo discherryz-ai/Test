@@ -301,6 +301,8 @@ namespace skyline::gpu {
             if (texture->cycle)
                 return false;
 
+            if (texture->dimensions.width == 848 && texture->dimensions.height == 252)
+                LOGW("DBG NAMERT readtrap {}", texture->DbgDescribe());
             texture->SynchronizeGuest(false, true); // We can skip trapping since the caller will do it
             return true;
         }, [weakThis] {
@@ -315,6 +317,8 @@ namespace skyline::gpu {
                 return false;
 
             if (texture->dirtyState != DirtyState::GpuDirty) {
+                if (texture->dimensions.width == 848 && texture->dimensions.height == 252)
+                    LOGW("DBG NAMERT writetrap(not gpu dirty) {}", texture->DbgDescribe());
                 texture->dirtyState = DirtyState::CpuDirty;
                 return true; // If the texture is already CPU dirty or we can transition it to being CPU dirty then we don't need to do anything
             }
@@ -331,6 +335,8 @@ namespace skyline::gpu {
             if (texture->cycle)
                 return false;
 
+            if (texture->dimensions.width == 848 && texture->dimensions.height == 252)
+                LOGW("DBG NAMERT writetrap(gpu dirty) {}", texture->DbgDescribe());
             texture->SynchronizeGuest(true, true); // We need to assume the texture is dirty since we don't know what the guest is writing
             return true;
         });
@@ -750,6 +756,15 @@ namespace skyline::gpu {
             munmap(alignedMirror.data(), alignedMirror.size());
     }
 
+    std::string Texture::DbgDescribe() const {
+        const char *state{dirtyState == DirtyState::Clean ? "Clean" : (dirtyState == DirtyState::CpuDirty ? "CpuDirty" : "GpuDirty")};
+        const uintptr_t address{guest && !guest->mappings.empty() ? reinterpret_cast<uintptr_t>(guest->mappings.front().data()) : uintptr_t{}};
+        return fmt::format("tex=0x{:x} addr=0x{:x} {}x{} state={} freed={} everRt={} layout={} replaced={}",
+                           static_cast<u64>(reinterpret_cast<uintptr_t>(this)), static_cast<u64>(address),
+                           static_cast<u32>(dimensions.width), static_cast<u32>(dimensions.height), state,
+                           static_cast<int>(memoryFreed), static_cast<int>(everUsedAsRt), static_cast<int>(layout), static_cast<int>(replaced));
+    }
+
     void Texture::lock() {
         mutex.lock();
         accumulatedCpuLockCounter++;
@@ -894,6 +909,8 @@ namespace skyline::gpu {
             auto lCycle{gpu.scheduler.Submit([&](vk::raii::CommandBuffer &commandBuffer) {
                 CopyFromStagingBuffer(commandBuffer, stagingBuffer);
             })};
+            if (dimensions.width == 848 && dimensions.height == 252)
+                LOGW("DBG NAMERT upload(host) gpuDirty={} {}", static_cast<int>(gpuDirty), DbgDescribe());
             lCycle->AttachObjects(stagingBuffer, shared_from_this());
             lCycle->ChainCycle(cycle);
             cycle = lCycle;
@@ -946,6 +963,8 @@ namespace skyline::gpu {
                     LOGW("DBG SyncInline #{} tex=0x{:x} gpuDirty={} rt={} w={} h={}", dbgInlineCount, static_cast<u64>(reinterpret_cast<uintptr_t>(this)), static_cast<int>(gpuDirty), static_cast<int>(everUsedAsRt), static_cast<u32>(dimensions.width), static_cast<u32>(dimensions.height));
                 }
             }
+            if (dimensions.width == 848 && dimensions.height == 252)
+                LOGW("DBG NAMERT upload(inline) gpuDirty={} {}", static_cast<int>(gpuDirty), DbgDescribe());
             pCycle->ChainCycle(cycle);
             cycle = pCycle;
         }
@@ -978,6 +997,9 @@ namespace skyline::gpu {
             dirtyState = cpuDirty ? DirtyState::CpuDirty : DirtyState::Clean;
             memoryFreed = false;
         }
+
+        if (dimensions.width == 848 && dimensions.height == 252)
+            LOGW("DBG NAMERT flush(host->guest) cpuDirty={} skipTrap={} {}", static_cast<int>(cpuDirty), static_cast<int>(skipTrap), DbgDescribe());
 
         if (layout == vk::ImageLayout::eUndefined || format != guest->format)
             // If the state of the host texture is undefined then so can the guest
