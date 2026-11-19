@@ -9,6 +9,8 @@
 #include <common/settings.h>
 #include "buffer.h"
 #include <gpu/dbg_toggle.h>
+#include <gpu/dbg_wait_profiler.h>
+#include <dlfcn.h>
 
 namespace skyline::gpu {
     void Buffer::ResetMegabufferState() {
@@ -411,11 +413,27 @@ namespace skyline::gpu {
         MarkGpuDirtyImpl();
     }
 
-    void Buffer::WaitOnFence() {
+    __attribute__((noinline)) void Buffer::WaitOnFence() {
         TRACE_EVENT("gpu", "Buffer::WaitOnFence");
 
         if (cycle) {
-            cycle->Wait();
+            // DEBUG (bufwait_patch.py): key = caller + size bucket, so waitprof separates callers and buffer sizes
+            size_t size{mirror.size()};
+            int bucket{size < 0x10000 ? 0 : (size < 0x100000 ? 1 : (size < 0x1000000 ? 2 : 3))};
+            static const char *const BucketTags[]{"buf-fence <64K", "buf-fence 64K-1M", "buf-fence 1M-16M", "buf-fence >=16M"};
+            const void *caller{__builtin_return_address(0)};
+            u64 start{dbg::WaitNowNs()};
+            {
+                dbg::WaitScope dbgWait{static_cast<const u8 *>(caller) + bucket, BucketTags[bucket]};
+                cycle->Wait();
+            }
+            u64 waitedNs{dbg::WaitNowNs() - start};
+            static std::atomic<u32> dbgLongWaits{};
+            if (waitedNs > 3000000 && dbgLongWaits.fetch_add(1) < 300) {
+                Dl_info info{};
+                const char *name{dladdr(caller, &info) && info.dli_sname ? info.dli_sname : "?"};
+                LOGW("DBG bufwait caller={} size={} ms={:.1f} direct={}", name, size, static_cast<double>(waitedNs) / 1e6, static_cast<int>(isDirect));
+            }
             cycle = nullptr;
         }
     }
