@@ -5,6 +5,7 @@
 #include <soc.h>
 #include <services/nvdrv/devices/deserialisation/deserialisation.h>
 #include "ctrl.h"
+#include <gpu/dbg_wait_profiler.h>
 
 namespace skyline::service::nvdrv::device::nvhost {
     Ctrl::SyncpointEvent::SyncpointEvent(const DeviceState &state) : event(std::make_shared<type::KEvent>(state, false)) {}
@@ -68,6 +69,7 @@ namespace skyline::service::nvdrv::device::nvhost {
     }
 
     PosixResult Ctrl::SyncpointWaitEventImpl(In<Fence> fence, In<i32> timeout, InOut<SyncpointEventValue> value, bool allocate) {
+        dbg::WaitScope dbgWait{__builtin_return_address(0), "guest-syncpoint"};
         LOGD("fence: ( id: {}, threshold: {} ), timeout: {}, value: {}, allocate: {}",
                             fence.id, fence.threshold, timeout, value.val, allocate);
 

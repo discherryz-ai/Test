@@ -127,12 +127,15 @@ namespace skyline::gpu {
         frameIndex = (frameIndex + 1) % swapchainImageCount;
 
         std::pair<vk::Result, u32> nextImage;
+        static const char dbgAcquireSite{};
+        u64 dbgAcquireStart{dbg::WaitNowNs()};
         while (nextImage = vkSwapchain->acquireNextImage(std::numeric_limits<u64>::max(), *acquireSemaphore, {}), nextImage.first != vk::Result::eSuccess) [[unlikely]] {
             if (nextImage.first == vk::Result::eSuboptimalKHR)
                 surfaceCondition.wait(lock, [this]() { return vkSurface.has_value(); });
             else
                 throw exception("vkAcquireNextImageKHR returned an unhandled result '{}'", vk::to_string(nextImage.first));
         }
+        dbg::WaitRecord(&dbgAcquireSite, "present-acquire", dbg::WaitNowNs() - dbgAcquireStart);
 
         auto &nextImageTexture{images.at(nextImage.second)};
         auto &presentSemaphore{presentSemaphores[nextImage.second]};
@@ -156,9 +159,12 @@ namespace skyline::gpu {
         // Pace actual submissions as well as guest VSync. Native-window timestamps
         // alone do not throttle buffer release consistently across Vulkan drivers.
         // The producer supplies the game's interval (1 = 60 FPS, 2 = 30 FPS).
+        static const char dbgPacingSite{};
+        u64 dbgPacingStart{dbg::WaitNowNs()};
         std::this_thread::sleep_until(guestFrameClock.SchedulePresent(
             GuestFrameClock::Clock::now(), static_cast<u32>(frame.swapInterval),
             !*state.settings->disableFrameThrottling));
+        dbg::WaitRecord(&dbgPacingSite, "present-pacing", dbg::WaitNowNs() - dbgPacingStart);
 
         i64 timestamp{frame.timestamp};
         if (timestamp) {

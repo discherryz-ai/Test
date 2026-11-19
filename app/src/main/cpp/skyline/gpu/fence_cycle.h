@@ -8,6 +8,7 @@
 #include <common.h>
 #include <common/spin_lock.h>
 #include <common/atomic_forward_list.h>
+#include <gpu/dbg_wait_profiler.h>
 
 namespace skyline::gpu {
     class CommandScheduler;
@@ -101,7 +102,8 @@ namespace skyline::gpu {
         /**
          * @brief Waits for submission of the command buffer associated with this cycle to the GPU
          */
-        void WaitSubmit() {
+        __attribute__((noinline)) void WaitSubmit() {
+            dbg::WaitScope dbgWait{__builtin_return_address(0), "wait-submit"};
             if (signalled.test(std::memory_order_consume))
                 return;
 
@@ -129,7 +131,8 @@ namespace skyline::gpu {
          * @brief Wait on a fence cycle till it has been signalled
          * @param shouldDestroy If true, the dependencies of this cycle will be destroyed after the fence is signalled
          */
-        void Wait(bool shouldDestroy = false) {
+        __attribute__((noinline)) void Wait(bool shouldDestroy = false) {
+            dbg::WaitScope dbgWait{__builtin_return_address(0), "wait-gpu"};
             if (signalled.test(std::memory_order_consume)) {
                 if (shouldDestroy) {
                     std::unique_lock lock{mutex};
