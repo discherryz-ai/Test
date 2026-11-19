@@ -419,6 +419,8 @@ namespace skyline::gpu {
         u32 lastRenderPassIndex{}; //!< The index of the last render pass that used this texture
         texture::RenderPassUsage lastRenderPassUsage{texture::RenderPassUsage::None}; //!< The type of usage in the last render pass
         bool everUsedAsRt{}; //!< If this texture has ever been used as a rendertarget
+        bool hostEverSynced{}; //!< If guest contents have ever been uploaded to the host texture
+        bool discardGuestOnSync{}; //!< Upload zeros instead of guest memory on the next host sync (fresh blit destinations)
         vk::PipelineStageFlags pendingStageMask{}; //!< List of pipeline stages that are yet to be flushed for reads since the last time this texture was used an an RT
         vk::PipelineStageFlags pendingStorageWriteStages{}; //!< Shader stages with unflushed storage-image writes
         vk::PipelineStageFlags readStageMask{}; //!< Set of pipeline stages that this texture has been read in since it was last used as an RT
@@ -502,6 +504,13 @@ namespace skyline::gpu {
          * @brief DEBUG: A short description of the texture (address, size, dirty state, ...) for the trace logs
          */
         std::string DbgDescribe() const;
+
+        /**
+         * @brief If this texture was never uploaded and is CPU dirty, make its first upload transparent zeros instead of stale guest memory
+         * @note Used for textures that are created to be the destination of a 2D blit
+         * @return If the texture was marked
+         */
+        bool DiscardGuestIfFresh();
 
         /**
          * @brief Creates a texture object wrapping the supplied backing with the supplied attributes

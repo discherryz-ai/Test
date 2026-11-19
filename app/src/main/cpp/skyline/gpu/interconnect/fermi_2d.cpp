@@ -142,6 +142,9 @@ namespace skyline::gpu::interconnect {
         executor.AttachTexture(srcTextureView.get());
 
         auto dstTextureView{gpu.texture.FindOrCreate(dstGuestTexture, executor.tag)};
+        bool dstDiscarded{dstTextureView->texture->DiscardGuestIfFresh()};
+        if (dstDiscarded && dstGuestTexture.dimensions.width == 848 && dstGuestTexture.dimensions.height == 252)
+            LOGW("DBG NAMEBLIT fresh dst, guest contents discarded {}", dstTextureView->texture->DbgDescribe());
         executor.AttachDependency(dstTextureView);
         executor.AttachTexture(dstTextureView.get());
         dstTextureView->texture->MarkGpuDirty(executor.usageTracker);

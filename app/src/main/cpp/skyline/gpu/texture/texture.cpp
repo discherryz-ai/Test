@@ -347,6 +347,15 @@ namespace skyline::gpu {
             throw exception("Guest and host dimensions being different is not supported currently");
 
         auto pointer{mirror.data()};
+        std::vector<u8> discardZeros;
+        if (discardGuestOnSync) {
+            discardGuestOnSync = false;
+            discardZeros.resize(mirror.size());
+            pointer = discardZeros.data();
+            if (dimensions.width == 848 && dimensions.height == 252)
+                LOGW("DBG NAMERT upload(zeros, fresh blit dst) {}", DbgDescribe());
+        }
+        hostEverSynced = true;
 
         WaitOnBacking();
 
@@ -853,6 +862,16 @@ namespace skyline::gpu {
             lCycle->AttachObject(shared_from_this());
             cycle = lCycle;
         }
+    }
+
+    bool Texture::DiscardGuestIfFresh() {
+        if (dbg::Mask() & 0x200000u)
+            return false; // A/B switch: keep the old behaviour
+        std::scoped_lock lock{stateMutex};
+        if (hostEverSynced || everUsedAsRt || dirtyState != DirtyState::CpuDirty)
+            return false;
+        discardGuestOnSync = true;
+        return true;
     }
 
     void Texture::MarkGpuDirty(UsageTracker &usageTracker) {
