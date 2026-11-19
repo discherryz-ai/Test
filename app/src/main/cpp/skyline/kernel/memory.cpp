@@ -123,37 +123,27 @@ namespace skyline::kernel {
     }
 
     void MemoryManager::ForeachChunkInRange(span<u8> memory, auto editCallback) {
-        auto chunkBase{chunks.lower_bound(memory.data())};
-        if (memory.data() < chunkBase->first)
-            --chunkBase;
+        // ForeachChunkInRange: re-looked-up after every callback, as callbacks (MapInternal) insert/erase/merge chunks
+        // which invalidates any iterator held across the call
+        u8 *current{memory.data()};
+        u8 *rangeEnd{memory.data() + memory.size()};
 
-        size_t sizeLeft{memory.size()};
+        while (current < rangeEnd) {
+            auto chunkBase{chunks.upper_bound(current)};
+            if (chunkBase == chunks.begin()) [[unlikely]]
+                break; // No chunk contains this address, this shouldn't happen as chunks cover the entire address space
+            --chunkBase; // The chunk containing `current`
 
-        if (chunkBase->first < memory.data()) [[unlikely]] {
-            size_t chunkSize{std::min<size_t>(chunkBase->second.size - (static_cast<size_t>(memory.data() - chunkBase->first)), memory.size())};
+            u8 *chunkEnd{chunkBase->first + chunkBase->second.size};
+            u8 *pieceEnd{std::min(chunkEnd, rangeEnd)};
+            if (pieceEnd <= current) [[unlikely]]
+                break;
 
-            std::pair<u8 *, ChunkDescriptor> temp{memory.data(), chunkBase->second};
-            temp.second.size = chunkSize;
+            std::pair<u8 *, ChunkDescriptor> temp{current, chunkBase->second};
+            temp.second.size = static_cast<size_t>(pieceEnd - current);
             editCallback(temp);
 
-            ++chunkBase;
-            sizeLeft -= chunkSize;
-        }
-
-        while (sizeLeft) {
-            if (sizeLeft < chunkBase->second.size) {
-                std::pair<u8 *, ChunkDescriptor> temp(*chunkBase);
-                temp.second.size = sizeLeft;
-                editCallback(temp);
-                break;
-            } else [[likely]] {
-                std::pair<u8 *, ChunkDescriptor> temp(*chunkBase);
-
-                editCallback(temp);
-
-                sizeLeft = sizeLeft - chunkBase->second.size;
-                ++chunkBase;
-            }
+            current = pieceEnd;
         }
     }
 
@@ -673,15 +663,17 @@ namespace skyline::kernel {
             ++dstChunk;
 
         if ((destination.data() + destination.size()) > dstChunk->first) [[likely]] {
-            ForeachChunkInRange(span<u8>{source.data() + (dstChunk->first - destination.data()), dstChunk->second.size}, [&](std::pair<u8 *, ChunkDescriptor> &desc) __attribute__((always_inline)) {
-                desc.second.permission = dstChunk->second.permission;
+            // Copy the destination chunk: MapInternal below edits `chunks`, so the iterator must not be used after it
+            const std::pair<u8 *, ChunkDescriptor> dstChunkCopy{*dstChunk};
+            ForeachChunkInRange(span<u8>{source.data() + (dstChunkCopy.first - destination.data()), dstChunkCopy.second.size}, [&](std::pair<u8 *, ChunkDescriptor> &desc) __attribute__((always_inline)) {
+                desc.second.permission = dstChunkCopy.second.permission;
                 desc.second.attributes.isBorrowed = false;
                 MapInternal(desc);
             });
 
             auto sourceHost{GetHostSpan(source)};
-            auto dstChunkHost{GetHostSpan(span<u8>{dstChunk->first, dstChunk->second.size})};
-            auto destinationOffset{dstChunk->first - destination.data()};
+            auto dstChunkHost{GetHostSpan(span<u8>{dstChunkCopy.first, dstChunkCopy.second.size})};
+            auto destinationOffset{dstChunkCopy.first - destination.data()};
             std::memcpy(sourceHost.data() + destinationOffset, dstChunkHost.data(), dstChunkHost.size());
         }
     }

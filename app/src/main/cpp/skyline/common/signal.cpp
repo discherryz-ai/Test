@@ -90,6 +90,8 @@ namespace skyline::signal {
      * @note Uses only dladdr and __android_log_print so it works even when the fault is inside a driver thread
      */
     void DbgReportCrash(int signal, siginfo *info, ucontext *context, const char *origin) {
+        if (signal == SIGINT)
+            return; // SIGINT is how the process stops its other threads after a crash, not a crash itself
         static std::atomic<int> reports{};
         if (reports.fetch_add(1) >= 8)
             return; // Avoid flooding the log if faults repeat
